@@ -16,3 +16,5 @@ env.sh
 submission/model_weights/
 submission/smolvlm_backbone/
 submission.zip
+.sweep.lock
+.sweep.pid

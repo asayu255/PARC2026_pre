@@ -41,8 +41,33 @@ fi
 
 mkdir -p logs
 
+# --- 多重起動の防止 ---------------------------------------------------------
+# 2 つのスイープを同時に走らせると、同じポートと同じ出力先を奪い合う。
+# 先に起動した方だけがポートを握り、後発のサーバーは bind に失敗して死ぬ
+# 一方で /health は先発が応答するため、すべての条件が同じサーバーに対して
+# 評価され、全部同じ結果になる。実際にそれで 3 条件とも exec=25 の
+# サーバーに対して走った。
+LOCK="$ROOT/.sweep.lock"
+PIDFILE="$ROOT/.sweep.pid"
+exec 9>>"$LOCK" || true          # >> にする。> だと保持者の PID を消してしまう
+if command -v flock >/dev/null 2>&1; then
+    if ! flock -n 9; then
+        holder="$(cat "$PIDFILE" 2>/dev/null || true)"
+        echo "[sweep] 既に別のスイープが動いている。中止する。"
+        if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
+            echo "    pid=$holder  $(tr '\0' ' ' < "/proc/$holder/cmdline" 2>/dev/null | cut -c1-90)"
+            echo "        止めるには: kill $holder"
+        else
+            echo "        止めるには: pkill -f sweep_nexec.sh"
+        fi
+        exit 1
+    fi
+    echo "$$" > "$PIDFILE"
+fi
+
 SRV=""
 cleanup() {
+    rm -f "${PIDFILE:-}" 2>/dev/null
     if [ -n "$SRV" ] && kill -0 "$SRV" 2>/dev/null; then
         echo "[sweep] サーバー ($SRV) を停止"
         kill "$SRV" 2>/dev/null
@@ -145,6 +170,19 @@ for N in $NEXEC_LIST; do
         echo "[sweep] N=$N は起動できなかったので飛ばす"
         cleanup; SRV=""
         continue
+    fi
+
+    # /health に応答しているのが自分の起動したサーバーか確認する。
+    # run_policy_server.sh は exec するので $SRV がそのまま python の PID。
+    # 別プロセスが握っていると、意図した PARC_N_EXEC ではないサーバーに
+    # 対して評価してしまい、誤った数字が出たまま気づけない。
+    owner="$(port_pids)"
+    if [ -n "$owner" ] && ! printf '%s\n' $owner | grep -qx "$SRV"; then
+        echo "[sweep] ポート $PORT に応答しているのは自分が起動したサーバーではない。"
+        echo "        起動したのは pid=$SRV、実際の占有は pid=$owner"
+        echo "        誤ったサーバーを評価してしまうため中止する。"
+        cleanup; SRV=""
+        exit 1
     fi
     grep -E '^\[MyPolicy\]' "logs/server_nexec${N}.log" | sed 's/^/    /'
 
