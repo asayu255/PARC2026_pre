@@ -196,7 +196,9 @@ class MyPolicy(BasePolicy):
         model = model.eval().to(self.device)
 
         self.preprocessor, self.postprocessor = make_pre_post_processors(
-            policy_cfg=cfg, pretrained_path=str(_WEIGHTS_DIR)
+            policy_cfg=cfg,
+            pretrained_path=str(_WEIGHTS_DIR),
+            preprocessor_overrides=self._preprocessor_overrides(),
         )
 
         self.state_dim = self._detect_state_dim()
@@ -212,6 +214,42 @@ class MyPolicy(BasePolicy):
             f" | exec={self.N_ACTION_EXEC} | flip180={self.FLIP_IMAGES_180}"
         )
         return model
+
+    def _preprocessor_overrides(self) -> dict:
+        """保存済み preprocessor の、外部通信を要する設定を差し替える。
+
+        vlm_model_name とは別に、policy_preprocessor.json の
+        tokenizer_processor が独自に tokenizer_name を持っており、
+        その値がハブ ID ("HuggingFaceTB/SmolVLM2-500M-Video-Instruct") のため
+        AutoTokenizer.from_pretrained() が別経路でハブを見に行く。
+        vlm_model_name だけ直しても採点環境では
+        LocalEntryNotFoundError で起動に失敗する。
+
+        あわせて device_processor の device も実機に合わせる
+        （保存値は "cuda" 固定のため、GPU が無い環境で落ちる）。
+
+        registry_name がそのまま override のキーになり、ユーザー指定が
+        保存値に優先する（lerobot/processor/pipeline.py:731, 735）。
+        存在しないキーを渡すと _validate_overrides_used が弾くため、
+        実際に保存されているステップにだけ override を当てる。
+        """
+        import json
+
+        try:
+            cfg = json.loads((_WEIGHTS_DIR / "policy_preprocessor.json").read_text())
+            names = {s.get("registry_name") for s in cfg.get("steps", [])}
+        except Exception as exc:
+            print(f"[MyPolicy] policy_preprocessor.json を読めず override を省略: {exc}")
+            return {}
+
+        overrides: dict = {}
+        if "tokenizer_processor" in names and _BACKBONE_DIR.is_dir():
+            overrides["tokenizer_processor"] = {"tokenizer_name": str(_BACKBONE_DIR)}
+        if "device_processor" in names and self.device is not None:
+            overrides["device_processor"] = {"device": str(self.device)}
+        if overrides:
+            print(f"[MyPolicy] preprocessor overrides: {overrides}")
+        return overrides
 
     def _detect_state_dim(self, default: int = 8) -> int:
         """normalizer の統計から observation.state の次元を読む。
