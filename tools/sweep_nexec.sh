@@ -57,12 +57,56 @@ health_ok() {
         "http://127.0.0.1:$PORT/health" >/dev/null 2>&1
 }
 
-wait_port_free() {
-    for _ in $(seq 1 30); do
-        health_ok || return 0
-        sleep 1
+# ポートを LISTEN している PID を返す。
+# pkill -f 'policy_server.py' は使わない。コマンドラインに同じ文字列を含む
+# 無関係なプロセス（このスクリプトを起動したシェルや grep 自身）まで
+# 巻き込むため。実際にそれで自分のシェルを落とした。
+port_pids() {
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltnpH "sport = :$PORT" 2>/dev/null \
+            | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u
+    elif command -v lsof >/dev/null 2>&1; then
+        lsof -ti "tcp:$PORT" -sTCP:LISTEN 2>/dev/null | sort -u
+    fi
+}
+
+# 前のサーバーが残っていると、新しいサーバーは bind に失敗して死ぬ一方で
+# /health は古い方が応答してしまう。その結果、意図した設定と違う
+# サーバーに対して評価が走り、誤った数字が出る。警告では済ませない。
+require_port_free() {
+    health_ok || return 0
+
+    local pids
+    pids="$(port_pids)"
+    echo "[sweep] ポート $PORT が既に使われている。"
+    for pid in $pids; do
+        echo "    pid=$pid  $(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | cut -c1-100)"
     done
-    echo "[sweep] 警告: ポート $PORT がまだ塞がっている"
+
+    if [ "${PARC_SWEEP_KILL_STALE:-0}" != "0" ] && [ -n "$pids" ]; then
+        echo "[sweep] PARC_SWEEP_KILL_STALE=1 のため、この PID だけを停止する"
+        # shellcheck disable=SC2086
+        kill $pids 2>/dev/null
+        for _ in $(seq 1 30); do
+            health_ok || { echo "[sweep] 解放された"; return 0; }
+            sleep 1
+        done
+        # shellcheck disable=SC2086
+        kill -9 $pids 2>/dev/null
+        for _ in $(seq 1 10); do
+            health_ok || { echo "[sweep] 解放された (SIGKILL)"; return 0; }
+            sleep 1
+        done
+    fi
+
+    echo
+    echo "[sweep] 中止する。古いサーバーが応答していると、新しい設定ではなく"
+    echo "        そちらに対して評価が走り、誤った結果になる。"
+    echo "        先に停止すること:"
+    [ -n "$pids" ] && echo "            kill $pids"
+    echo "        または自動で停止させる:"
+    echo "            PARC_SWEEP_KILL_STALE=1 bash tools/sweep_nexec.sh"
+    return 1
 }
 
 # 評価側の環境（venv / PYTHONPATH / LIBERO_ROOT / OSMesa）
@@ -72,13 +116,15 @@ if [ -z "${LIBERO_ROOT:-}" ]; then
     source ./activate_parc.sh
 fi
 
+require_port_free || exit 1
+
 for N in $NEXEC_LIST; do
     OUT="results/nexec${N}"
     echo
     echo "=== N_ACTION_EXEC=$N ==============================="
     rm -rf "$OUT"; mkdir -p "$OUT"
 
-    wait_port_free
+    require_port_free || exit 1
     PARC_N_EXEC="$N" PARC_PORT="$PORT" \
         bash tools/run_policy_server.sh > "logs/server_nexec${N}.log" 2>&1 &
     SRV=$!
@@ -110,6 +156,7 @@ for N in $NEXEC_LIST; do
     [ "$rc" = "0" ] || echo "[sweep] 評価が rc=$rc で終了。logs/eval_nexec${N}.log を確認"
 
     cleanup; SRV=""
+    for _ in $(seq 1 30); do health_ok || break; sleep 1; done
 done
 
 echo
