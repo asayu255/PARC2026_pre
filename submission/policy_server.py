@@ -139,6 +139,7 @@ class MyPolicy(BasePolicy):
         self.postprocessor = None
         self.state_dim = 8
         self._dbg_n = 0
+        self._trace_i = 0
         self._warming = False
         self.model = self._load_model()
         self._warmup()
@@ -321,6 +322,39 @@ class MyPolicy(BasePolicy):
         except Exception as exc:
             print(f"[MyPolicy][debug] 出力ダンプに失敗: {exc}")
 
+    def _trace_step(self, obs: dict[str, np.ndarray]) -> None:
+        """毎ステップ、手先と各物体の距離を CSV に追記する。
+
+        観測には <物体名>_to_robot0_eef_pos が含まれる（評価側の rollout.py が
+        衝突判定でこのサフィックスを除外していることから存在が分かる）。
+        そのノルムが手先と物体の距離になる。
+
+        画像の向きが正しければ、対象物体との距離はエピソード中に単調に
+        近づくはずである。向きが誤っていれば無関係に動き回る。
+        FLIP_IMAGES_180 を True / False で振って min 距離を比べれば、
+        目視に頼らず客観的に判定できる。
+        """
+        try:
+            keys = sorted(k for k in obs if k.endswith("_to_robot0_eef_pos"))
+            path = Path(_DEBUG_DIR) / "trace.csv"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if self._trace_i == 0:
+                cols = ["step", "eef_x", "eef_y", "eef_z"]
+                cols += [k[: -len("_to_robot0_eef_pos")] for k in keys]
+                path.write_text(",".join(cols) + "\n")
+                print(f"[MyPolicy][debug] trace 対象の物体: "
+                      f"{[k[: -len('_to_robot0_eef_pos')] for k in keys]}")
+            eef = np.asarray(obs.get("robot0_eef_pos", np.zeros(3)), dtype=np.float64)
+            row = [str(self._trace_i)] + [f"{v:.4f}" for v in eef]
+            row += [f"{float(np.linalg.norm(np.asarray(obs[k], dtype=np.float64))):.4f}"
+                    for k in keys]
+            with path.open("a") as f:
+                f.write(",".join(row) + "\n")
+            self._trace_i += 1
+        except Exception as exc:
+            print(f"[MyPolicy][debug] trace に失敗: {exc}")
+            self._trace_i += 1
+
     def _state_stats(self):
         """normalizer が持つ observation.state の mean / std を numpy で返す。"""
         try:
@@ -380,6 +414,8 @@ class MyPolicy(BasePolicy):
     # ------------------------------------------------------------
 
     def get_action(self, obs: dict[str, np.ndarray]) -> np.ndarray:
+        if _DEBUG_DIR and not self._warming:
+            self._trace_step(obs)
         if not self._queue:
             chunk = np.asarray(self._predict_chunk(obs), dtype=np.float32)
             chunk = chunk.reshape(-1, 7)
