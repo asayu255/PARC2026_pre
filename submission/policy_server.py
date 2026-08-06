@@ -72,57 +72,79 @@ class BasePolicy(ABC):
 
 _HERE = Path(__file__).resolve().parent
 _WEIGHTS_DIR = _HERE / "model_weights"
+_BACKBONE_DIR = _HERE / "smolvlm_backbone"
 
 
 class MyPolicy(BasePolicy):
-    """ベースラインポリシー。
+    """SmolVLA (lerobot/smolvla_libero_plus) ポリシー。
 
-    モデル未搭載でも評価パイプラインを最後まで通せる状態にしてある。
-    モデルを組み込むときに触るのは次の 2 箇所だけでよい。
+    model_weights/ が無い場合はゼロ action の静止ベースラインとして動作し、
+    評価パイプラインの疎通確認に使える。
 
-        _load_model()    : 起動時に 1 回だけ呼ばれる。重みのロードをここに書く
-        _predict_chunk() : 観測から action を推論する。ここに推論を書く
+    入出力の仕様は checkpoint の実物から確定させたものである（推測ではない）。
 
-    get_action() / reset() 側には、提出物として必要な作法
-    （出力の shape・dtype 正規化、NaN/Inf 除去、値域クリップ、
-    エピソード境界でのキャッシュ破棄）を既に入れてある。
+    policy_preprocessor.json の rename_observations_processor:
+        observation.images.front -> observation.images.camera1
+        observation.images.wrist -> observation.images.camera2
+    したがって渡すキーは front / wrist であり camera1 / camera2 ではない。
 
-    現状の _predict_chunk() はゼロ action を返すため、成功率は 0 になる。
-    ランダム action ではなく「静止」を既定にしているのは、
-    ランダムだと周囲の物体に接触して collision_rate が汚れ、
-    モデル組み込み後の比較対象として使えなくなるためである。
+    normalizer の observation.state 統計は 8 次元で、値域から
+        [0:3] eef_pos       (±0.5 程度, m)
+        [3:6] axis_angle    (±3.8 程度, rad)
+        [6:8] gripper_qpos  (±0.042, std 0.014)
+    と読める。config.json の input_features は [6] と宣言しているが、
+    NormalizerProcessorStep._apply_transform は統計をスライスせず
+    (tensor - mean) / std をそのまま適用するため、統計側の次元に合わせる。
+    次元は起動時に統計から自動判定する（_detect_state_dim）。
+
+    camera3 / empty_camera_0 / empty_camera_1 は渡さない。
+    SmolVLAPolicy.prepare_images が不足キーを -1 埋めの空画像で補い
+    (config.empty_cameras=2)、normalizer は存在するキーのみ処理する。
+    学習時も front / wrist のみだったため条件は一致する。
+
+    画像は float32 CHW の [0, 1] で渡す。512 へのリサイズと [-1, 1] への
+    変換は prepare_images がモデル内部で行うので、ここでやってはいけない。
     """
 
-    #: 1 回の推論で生成する action の本数（action chunking を使わないなら 1）
-    ACTION_CHUNK_SIZE = 1
+    # --- 提出物の観測 -> SmolVLA の入力キー（rename_map の左辺）---------------
+    KEY_MAIN = "observation.images.front"    # agentview      -> camera1
+    KEY_WRIST = "observation.images.wrist"   # eye_in_hand    -> camera2
+    KEY_STATE = "observation.state"
 
-    #: 生成したチャンクのうち、実際に環境へ流すステップ数。
-    #: ACTION_CHUNK_SIZE より小さくすると推論頻度が上がり閉ループ性が増す。
-    N_ACTION_EXEC = 1
+    #: LIBERO の生画像を LeRobot 側の向きへ揃える 180 度回転。
+    #: LiberoProcessorStep (lerobot/processor/env_processor.py) が
+    #: torch.flip(img, dims=[2, 3]) で行っているのと同じ変換である。
+    #: state のレイアウトが同 Step の出力と一致することから同系統の変換と判断した。
+    #: 成功率が 0 のまま動かない場合は、まずここを False にして A/B すること。
+    FLIP_IMAGES_180 = True
+
+    #: config.json の chunk_size / n_action_steps に一致させる
+    ACTION_CHUNK_SIZE = 50
+
+    #: 生成したチャンクのうち実際に環境へ流すステップ数。
+    #: 小さくすると推論頻度が上がり閉ループ性が増す（衝突対策の調整点）。
+    N_ACTION_EXEC = 50
 
     def __init__(self):
         self.instruction = ""
         self._queue: deque[np.ndarray] = deque()
+        self.torch = None
+        self.device = None
+        self.preprocessor = None
+        self.postprocessor = None
+        self.state_dim = 8
         self.model = self._load_model()
         self._warmup()
 
     # ------------------------------------------------------------
-    # モデルを組み込むときに編集する箇所
+    # モデルのロードと推論
     # ------------------------------------------------------------
 
     def _load_model(self):
-        """重みをロードして返す。モデル未搭載なら None を返す。
+        """SmolVLA と保存済み processor をロードする。
 
         サーバー起動から /health が 200 を返すまでの制限は 120 秒である。
-        重い初期化はすべてここで済ませ、get_action() には持ち込まないこと。
-
-        実装例:
-            import torch
-            from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
-
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
-            model = SmolVLAPolicy.from_pretrained(_WEIGHTS_DIR)
-            return model.eval().to(self.device)
+        実測のロード時間は約 7 秒。
         """
         if not _WEIGHTS_DIR.is_dir():
             print(
@@ -131,41 +153,134 @@ class MyPolicy(BasePolicy):
             )
             return None
 
-        # TODO: ここで重みをロードする
-        print(
-            f"[MyPolicy] {_WEIGHTS_DIR} を検出したが _load_model() が未実装のため、"
-            " ゼロ action のベースラインで動作する。"
+        import torch
+        from lerobot.configs.policies import PreTrainedConfig
+        from lerobot.policies.factory import make_pre_post_processors
+        from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+
+        self.torch = torch
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+        cfg = PreTrainedConfig.from_pretrained(str(_WEIGHTS_DIR), local_files_only=True)
+
+        # 採点環境は外部通信が無く HF キャッシュも存在しない。
+        # バックボーンを同梱している場合はローカルパスを見るよう差し替える。
+        if _BACKBONE_DIR.is_dir():
+            cfg.vlm_model_name = str(_BACKBONE_DIR)
+            print(f"[MyPolicy] VLM backbone: {_BACKBONE_DIR}")
+        else:
+            print(
+                f"[MyPolicy] 警告: {_BACKBONE_DIR} が無い。"
+                f" vlm_model_name={getattr(cfg, 'vlm_model_name', '?')} を"
+                " HF キャッシュから解決するため、採点環境では起動に失敗する。"
+            )
+
+        model = SmolVLAPolicy.from_pretrained(
+            str(_WEIGHTS_DIR), config=cfg, local_files_only=True
         )
-        return None
+        model = model.eval().to(self.device)
+
+        self.preprocessor, self.postprocessor = make_pre_post_processors(
+            policy_cfg=cfg, pretrained_path=str(_WEIGHTS_DIR)
+        )
+
+        self.state_dim = self._detect_state_dim()
+        if self.state_dim not in (6, 8):
+            raise RuntimeError(
+                f"observation.state の次元 {self.state_dim} に対応する構成が不明。"
+                " 6 (eef_pos+axis_angle) か 8 (+gripper_qpos) のみ対応する。"
+            )
+
+        print(
+            f"[MyPolicy] SmolVLA ready | device={self.device}"
+            f" | state_dim={self.state_dim} | chunk={self.ACTION_CHUNK_SIZE}"
+            f" | exec={self.N_ACTION_EXEC} | flip180={self.FLIP_IMAGES_180}"
+        )
+        return model
+
+    def _detect_state_dim(self, default: int = 8) -> int:
+        """normalizer の統計から observation.state の次元を読む。
+
+        config.json の input_features は [6] を宣言しているが、統計は 8 次元で
+        あり、正規化は統計側の次元で行われる。実際に適用される側に合わせる。
+        """
+        try:
+            for step in getattr(self.preprocessor, "steps", []):
+                stats = getattr(step, "_tensor_stats", None)
+                if stats and self.KEY_STATE in stats:
+                    mean = stats[self.KEY_STATE].get("mean")
+                    if mean is not None:
+                        return int(mean.numel())
+        except Exception as exc:
+            print(f"[MyPolicy] state 次元の自動判定に失敗: {exc}")
+        print(f"[MyPolicy] state 次元を判定できず、既定値 {default} を使う。")
+        return default
 
     def _predict_chunk(self, obs: dict[str, np.ndarray]) -> np.ndarray:
-        """観測から action を推論し、shape (N, 7) で返す。
+        """観測から action chunk を推論し shape (N, 7) で返す。
 
-        1 リクエストの制限は 10 秒である。1 回でも超過するとトラック全体が
-        0 点になるため、ここが唯一の重い処理であることを意識すること。
-
-        利用できる観測キー（BasePolicy.get_action の docstring 参照）:
-            agentview_image           (128, 128, 3) uint8
-            robot0_eye_in_hand_image  (128, 128, 3) uint8
-            robot0_joint_pos          (7,)  float
-            robot0_eef_pos            (3,)  float
-            robot0_eef_quat           (4,)  float
-            robot0_gripper_qpos       (2,)  float
-
-        言語指示は self.instruction に入っている。
-
-        実装例（action chunking）:
-            batch = self._preprocess(obs)
-            with torch.no_grad():
-                chunk = self.model.predict_action_chunk(batch)
-            return chunk.squeeze(0).cpu().numpy()
+        1 リクエストの制限は 10 秒。1 回でも超過するとトラック全体が 0 点になる。
         """
         if self.model is None:
-            # ベースライン: 何もしない（静止）
             return np.zeros((self.ACTION_CHUNK_SIZE, 7), dtype=np.float32)
 
-        # TODO: ここで推論する
-        return np.zeros((self.ACTION_CHUNK_SIZE, 7), dtype=np.float32)
+        torch = self.torch
+        batch = {
+            self.KEY_MAIN: self._to_image(obs["agentview_image"]),
+            self.KEY_WRIST: self._to_image(obs["robot0_eye_in_hand_image"]),
+            self.KEY_STATE: self._to_state(obs),
+            "task": [self.instruction],
+        }
+        batch = self.preprocessor(batch)
+        with torch.inference_mode():
+            chunk = self.model.predict_action_chunk(batch)   # (1, chunk, 7)
+        chunk = self.postprocessor(chunk)                    # 逆正規化
+
+        arr = np.asarray(chunk.squeeze(0).float().cpu().numpy(), dtype=np.float32)
+        if arr.ndim != 2 or arr.shape[1] != 7:
+            raise RuntimeError(f"予期しない chunk shape: {arr.shape}（期待 (N, 7)）")
+        return arr
+
+    def _to_image(self, hwc_uint8: np.ndarray):
+        """uint8 HWC -> float32 (1, 3, H, W) [0, 1]、必要なら 180 度回転。
+
+        512 へのリサイズと [-1, 1] への変換は SmolVLAPolicy.prepare_images が
+        内部で行うため、ここでは行わない（二重適用になる）。
+        """
+        torch = self.torch
+        t = torch.from_numpy(np.ascontiguousarray(hwc_uint8))
+        t = t.permute(2, 0, 1).unsqueeze(0).float() / 255.0
+        if self.FLIP_IMAGES_180:
+            t = torch.flip(t, dims=[2, 3])
+        return t.to(self.device)
+
+    def _to_state(self, obs: dict[str, np.ndarray]):
+        """eef_pos(3) + axis_angle(3) [+ gripper_qpos(2)] を組み立てる。"""
+        torch = self.torch
+        parts = [
+            np.asarray(obs["robot0_eef_pos"], dtype=np.float32).reshape(3),
+            self._quat2axisangle(obs["robot0_eef_quat"]),
+        ]
+        if self.state_dim == 8:
+            parts.append(
+                np.asarray(obs["robot0_gripper_qpos"], dtype=np.float32).reshape(2)
+            )
+        state = np.concatenate(parts).astype(np.float32)
+        return torch.from_numpy(state).unsqueeze(0).to(self.device)
+
+    @staticmethod
+    def _quat2axisangle(quat: np.ndarray) -> np.ndarray:
+        """クォータニオン (x, y, z, w) を軸角 (3,) へ変換する。
+
+        lerobot/processor/env_processor.py:113-152 の _quat2axisangle と
+        同じ式・同じゼロ割ガード (den > 1e-10) を numpy に写したもの。
+        """
+        q = np.asarray(quat, dtype=np.float32).reshape(4)
+        w = float(np.clip(q[3], -1.0, 1.0))
+        den = float(np.sqrt(max(0.0, 1.0 - w * w)))
+        if den <= 1e-10:
+            return np.zeros(3, dtype=np.float32)
+        return ((q[:3] / den) * (2.0 * np.arccos(w))).astype(np.float32)
 
     # ------------------------------------------------------------
     # 以下は原則そのままで動く（提出物としての作法）
@@ -185,6 +300,8 @@ class MyPolicy(BasePolicy):
         # action が次エピソードの冒頭に流れ込んで衝突の原因になる。
         self.instruction = instruction
         self._queue.clear()
+        if self.model is not None:
+            self.model.reset()   # SmolVLA 内部の action queue もクリアする
 
     @staticmethod
     def _sanitize(action: np.ndarray) -> np.ndarray:
@@ -198,7 +315,7 @@ class MyPolicy(BasePolicy):
 
         CUDA カーネルのコンパイル等は初回推論で走る。それが 1 エピソード目の
         1 ステップ目に起きると 10 秒制限に触れうるため、120 秒の枠がある
-        起動時に済ませておく。
+        起動時に済ませておく。キューを都度捨てて実推論を 2 回強制する。
         """
         dummy = {
             "agentview_image": np.zeros((128, 128, 3), dtype=np.uint8),
@@ -210,6 +327,7 @@ class MyPolicy(BasePolicy):
         }
         try:
             for _ in range(2):
+                self._queue.clear()
                 self.get_action(dummy)
         except Exception as exc:
             print(f"[MyPolicy] warmup に失敗（無視して続行）: {exc}")

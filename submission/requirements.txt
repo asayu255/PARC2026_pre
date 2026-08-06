@@ -4,7 +4,7 @@ uvicorn>=0.15
 msgpack>=1.0
 numpy>=1.19
 
-# 以下に自分のモデルに必要なライブラリを追加してください
-# 例:
-# torch>=2.0
-# transformers>=4.30
+# SmolVLA (lerobot/smolvla_libero_plus) の推論に必要
+# 採点環境は外部通信を遮断するため、git+ や --index-url は使用できない。
+torch==2.10.0
+lerobot[smolvla]==0.4.4
