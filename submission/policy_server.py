@@ -117,9 +117,16 @@ class MyPolicy(BasePolicy):
     KEY_STATE = "observation.state"
 
     #: LIBERO の生画像を LeRobot 側の向きへ揃える 180 度回転。
-    #: LiberoProcessorStep (lerobot/processor/env_processor.py) が
-    #: torch.flip(img, dims=[2, 3]) で行っているのと同じ変換である。
-    #: state のレイアウトが同 Step の出力と一致することから同系統の変換と判断した。
+    #: LiberoProcessorStep (lerobot/processor/env_processor.py) の
+    #: torch.flip(img, dims=[2, 3]) と同じ変換である。
+    #:
+    #: 実測で確定済み。put_the_bowl_on_the_stove_light_11 を 150 ステップ
+    #: 走らせ、対象物体への最接近距離を比較した結果:
+    #:     True : bowl 0.078 (最接近 step 41) < wine 0.102 < cream 0.138
+    #:     False: wine 0.166 < bowl 0.180 < cream 0.185
+    #: True では指示された bowl が最も近く軌跡も収束するが、False では
+    #: 3 物体が 0.166-0.185 に団子になり選択性が失われる。対象への接近は 2.3 倍差。
+    #:
     #: A/B 用に PARC_FLIP180=0 で無効化できる。既定（未設定）は有効。
     FLIP_IMAGES_180 = os.environ.get("PARC_FLIP180", "1") != "0"
 

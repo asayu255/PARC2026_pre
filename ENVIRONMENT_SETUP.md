@@ -25,18 +25,19 @@
 - LeRobot 0.4.4 と CUDA 対応 PyTorch
 - `lerobot/smolvla_libero_plus` の取得
 - SmolVLA のオフライン GPU ロード
+- `submission/policy_server.py` の `_load_model()` / `_predict_chunk()` 実装
+- PARC 観測から LeRobot / SmolVLA 入力への変換（下記 16.1 で仕様を確定）
+- 保存済み preprocessor / postprocessor を使った正規化・逆正規化
+- SmolVLA による action chunk 推論（推論 0.24 秒、10 秒制限に対し 40 倍の余裕）
+- 実モデルを使った Track 1 公開 4 タスクの評価
 
 ### 未完了のもの
 
-- `submission/policy_server.py` の `_load_model()` 実装
-- PARC 観測から LeRobot / SmolVLA 入力への変換
-- `policy_preprocessor.json` を使った前処理
-- SmolVLA による action chunk 推論
-- `policy_postprocessor.json` を使った action の逆正規化
-- 提出 ZIP 内だけで完結する VLM バックボーンの同梱
-- 実モデルを使った成功率評価
+- 提出 ZIP 内だけで完結する VLM バックボーンの同梱（**提出の前提条件**）
+- 成功率の改善（追加学習）
 
-現在の `submission/policy_server.py` は `model_weights/` を検出してもモデルをロードせず、ゼロ action を返す。したがって評価パイプラインは完走するが成功率は 0% になる。
+実モデルでの評価は完走するが、公開 4 タスクの成功率は 0% である。配線は
+実測で全項目を裏付けた（16.1）ので、残るのはモデルの能力の問題である。
 
 ---
 
@@ -743,6 +744,32 @@ SmolVLA 接続時には次が必要。
 7. postprocessor で action を逆正規化する
 8. 必要な本数だけ queue へ入れる
 
+### 16.1 確定した入出力仕様（実測で裏付け済み）
+
+checkpoint の実物と LeRobot 0.4.4 のソースから確定させたもの。推測ではない。
+
+| 項目 | 確定内容 | 根拠 |
+|---|---|---|
+| 入力キー | `observation.images.front` / `.wrist` | `policy_preprocessor.json` の rename_map が front→camera1、wrist→camera2 と定義。camera1 を直接渡すのは誤り |
+| カメラ対応 | agentview→front、eye_in_hand→wrist | 同上 |
+| 不足カメラ | camera3 / empty_camera_0 / 1 は渡さない | `prepare_images` が -1 埋めで補う (empty_cameras=2)。normalizer は存在キーのみ処理。学習時も front/wrist のみ |
+| state 次元 | **8**（config の `[6]` ではない） | normalizer の統計が 8 次元で、`_apply_transform` は統計をスライスしない |
+| state 構成 | eef_pos(3) + axis_angle(3) + gripper_qpos(2) | 統計の値域。実測 `max\|z\|`=1.52 で分布内 |
+| quat 順序 | `(x, y, z, w)` | axis_angle の大成分が統計 mean と同じ 3 次元目に来る |
+| 画像形式 | float32 CHW `[0,1]`。512 リサイズと `[-1,1]` 化はしない | `prepare_images` がモデル内部で実施。二重適用になる |
+| 画像の向き | **180 度回転する** | A/B 実測。対象物体への最接近が 0.078 対 0.180 で 2.3 倍差 |
+| chunk | 50 本、`postprocessor` で逆正規化 | config の chunk_size / n_action_steps |
+
+計装は `PARC_DEBUG_DIR` を設定したときのみ有効になる。
+
+```bash
+PARC_DEBUG_DIR=/tmp/parc_dbg python policy_server.py --port 8002
+```
+
+生画像・実際にモデルへ入る画像・state の z-score・action chunk の統計を
+最初の 3 回分ダンプし、毎ステップの手先と各物体の距離を `trace.csv` に記録する。
+`PARC_FLIP180=0` で画像回転を無効化した対照群が取れる。
+
 ---
 
 ## 17. タイムアウト制約
@@ -869,18 +896,37 @@ pgrep -af 'policy_server.py|uvicorn'
 
 ---
 
-## 21. 次の実装作業
+## 21. 次の作業
 
-1. `SmolVLAPolicy.from_pretrained()` を `_load_model()` へ移植
-2. `make_pre_post_processors()` で保存済み processor をロード
-3. `config.json` と `policy_preprocessor.json` の入力キーを確認
-4. PARC 観測から SmolVLA state を構成
-5. 2 カメラを学習時のカメラキーへ対応付ける
-6. `predict_action_chunk()` を実行
-7. postprocessor を適用
-8. shape `(50, 7)` と推論時間を検証
-9. 1 タスク・20 ステップでスモークテスト
-10. 1 タスク・100 ステップで動作確認
-11. 公開 4 タスクを各 2 エピソードで評価
-12. VLM バックボーンを提出ディレクトリへ同梱
-13. 完全オフライン状態で提出 ZIP を検証
+配線は完了し実測で裏付けた。残りは 2 つである。
+
+### A. VLM バックボーンの同梱（提出の前提条件・成功率とは独立）
+
+これを済ませない限り、成功率がいくら出ても採点環境では起動段階で落ちる。
+
+```bash
+cd ~/PARC2026_pre/submission
+hf download HuggingFaceTB/SmolVLM2-500M-Video-Instruct --local-dir smolvlm_backbone
+```
+
+`policy_server.py` は `smolvlm_backbone/` があれば `vlm_model_name` を自動で
+そこへ差し替える。HF キャッシュを隠して検証すること。
+
+```bash
+HF_HOME=/tmp/empty_hf_home HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+  python policy_server.py --port 8002
+```
+
+### B. 成功率の改善（追加学習）
+
+ベースモデルは対象物体まで到達できるが把持に至らない（最接近 7.8cm の後に離脱）。
+要因は次の 2 つと考えられる。
+
+- 学習は 256x256、PARC は 128x128（`pipeline/config.py:51`）。画素数が 1/4 で、
+  これは評価側の固定値なので提出側では回復できない
+- ベースモデルの学習タスクは 40 種類のみ（`task_index.max=39`）。PARC の 4 タスクは
+  背景テクスチャ・照明を変えた L2〜L5 の摂動版である
+
+`examples/smolvla_libero_spatial_lora.ipynb` を出発点に LoRA 追加学習を行う。
+ノートブックは 10 タスク x 5 エピソード・3000 steps の最小構成なので、
+PARC のタスク構成に近いデータで条件を組み直す。
