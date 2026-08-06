@@ -111,10 +111,16 @@ class MyPolicy(BasePolicy):
     変換は prepare_images がモデル内部で行うので、ここでやってはいけない。
     """
 
-    # --- 提出物の観測 -> SmolVLA の入力キー（rename_map の左辺）---------------
-    KEY_MAIN = "observation.images.front"    # agentview      -> camera1
-    KEY_WRIST = "observation.images.wrist"   # eye_in_hand    -> camera2
+    # --- 提出物の観測 -> SmolVLA の入力キー -----------------------------------
+    # 実際に使うキーは起動時に policy_preprocessor.json の rename_map から
+    # 導出する（_resolve_image_keys）。追加学習でキー名が変わっても追従する。
+    # 以下は導出できなかった場合のフォールバック既定。
+    KEY_MAIN = "observation.images.front"    # agentview   -> camera1
+    KEY_WRIST = "observation.images.wrist"   # eye_in_hand -> camera2
     KEY_STATE = "observation.state"
+
+    #: 手先カメラと判定する語（キー名に含まれていれば wrist 扱い）
+    WRIST_HINTS = ("wrist", "eye_in_hand", "in_hand", "hand", "gripper")
 
     #: LIBERO の生画像を LeRobot 側の向きへ揃える 180 度回転。
     #: LiberoProcessorStep (lerobot/processor/env_processor.py) の
@@ -145,6 +151,8 @@ class MyPolicy(BasePolicy):
         self.preprocessor = None
         self.postprocessor = None
         self.state_dim = 8
+        self.key_main = self.KEY_MAIN
+        self.key_wrist = self.KEY_WRIST
         self._dbg_n = 0
         self._trace_i = 0
         self._warming = False
@@ -201,6 +209,7 @@ class MyPolicy(BasePolicy):
             preprocessor_overrides=self._preprocessor_overrides(),
         )
 
+        self._resolve_image_keys()
         self.state_dim = self._detect_state_dim()
         if self.state_dim not in (6, 8):
             raise RuntimeError(
@@ -212,8 +221,88 @@ class MyPolicy(BasePolicy):
             f"[MyPolicy] SmolVLA ready | device={self.device}"
             f" | state_dim={self.state_dim} | chunk={self.ACTION_CHUNK_SIZE}"
             f" | exec={self.N_ACTION_EXEC} | flip180={self.FLIP_IMAGES_180}"
+            f"\n[MyPolicy]   main={self.key_main} wrist={self.key_wrist}"
         )
         return model
+
+    def _resolve_image_keys(self) -> None:
+        """モデルへ渡す画像キーを policy_preprocessor.json から導出する。
+
+        rename_observations_processor が最初に走るため、こちらが渡すべきキーは
+        rename_map の「左辺」である。追加学習でデータセットの feature 名が
+        変わると右辺も左辺も変わるので、定数で持たず毎回読み直す。
+
+        rename_map が空の checkpoint では、モデルの image feature 名を
+        そのまま渡す形になるため、そちらを候補にする。
+
+        main / wrist の割り当ては名前で判定し（WRIST_HINTS）、判定できない
+        場合は右辺の cameraN の番号順、それも無ければ辞書順で先頭を main とする。
+        導出に失敗した場合はクラス定数のフォールバック既定を使う。
+        """
+        import json
+        import re
+
+        prefix = "observation.images."
+        try:
+            cfg = json.loads((_WEIGHTS_DIR / "policy_preprocessor.json").read_text())
+        except Exception as exc:
+            print(f"[MyPolicy] 画像キーを導出できず既定を使う: {exc}")
+            return
+
+        rename: dict[str, str] = {}
+        for step in cfg.get("steps", []):
+            if step.get("registry_name") == "rename_observations_processor":
+                rename = step.get("config", {}).get("rename_map", {}) or {}
+                break
+
+        if rename:
+            # 左辺が渡すべきキー。右辺の cameraN の番号で並べる。
+            def order(item):
+                m = re.search(r"(\d+)$", item[1])
+                return (int(m.group(1)) if m else 999, item[0])
+
+            candidates = [k for k, _ in sorted(rename.items(), key=order)
+                          if k.startswith(prefix)]
+        else:
+            # rename が無い場合はモデルの image feature 名をそのまま渡す。
+            # empty_camera_* はプレースホルダなので候補から除く。
+            feats = (cfg.get("steps") and self._normalizer_features(cfg)) or {}
+            candidates = sorted(
+                k for k, v in feats.items()
+                if k.startswith(prefix)
+                and "empty_camera" not in k
+                and (v or {}).get("type") == "VISUAL"
+            )
+
+        if not candidates:
+            print("[MyPolicy] 画像キーの候補が見つからず既定を使う。")
+            return
+
+        wrist = next(
+            (k for k in candidates
+             if any(h in k[len(prefix):].lower() for h in self.WRIST_HINTS)),
+            None,
+        )
+        main = next((k for k in candidates if k != wrist), None)
+        if wrist is None:
+            main, wrist = candidates[0], (candidates[1] if len(candidates) > 1 else None)
+
+        if main is None:
+            print("[MyPolicy] main カメラを決められず既定を使う。")
+            return
+
+        self.key_main, self.key_wrist = main, wrist
+        unused = [k for k in candidates if k not in (main, wrist)]
+        if unused:
+            print(f"[MyPolicy] 渡さない画像キー（観測が 2 つしか無いため）: {unused}")
+
+    @staticmethod
+    def _normalizer_features(cfg: dict) -> dict:
+        """normalizer_processor の features 定義を取り出す。"""
+        for step in cfg.get("steps", []):
+            if step.get("registry_name") == "normalizer_processor":
+                return step.get("config", {}).get("features", {}) or {}
+        return {}
 
     def _preprocessor_overrides(self) -> dict:
         """保存済み preprocessor の、外部通信を要する設定を差し替える。
@@ -279,11 +368,12 @@ class MyPolicy(BasePolicy):
 
         torch = self.torch
         batch = {
-            self.KEY_MAIN: self._to_image(obs["agentview_image"]),
-            self.KEY_WRIST: self._to_image(obs["robot0_eye_in_hand_image"]),
+            self.key_main: self._to_image(obs["agentview_image"]),
             self.KEY_STATE: self._to_state(obs),
             "task": [self.instruction],
         }
+        if self.key_wrist:
+            batch[self.key_wrist] = self._to_image(obs["robot0_eye_in_hand_image"])
         dumping = (
             bool(_DEBUG_DIR) and not self._warming and self._dbg_n < _DEBUG_MAX
         )
@@ -320,7 +410,10 @@ class MyPolicy(BasePolicy):
             Image.fromarray(obs["agentview_image"]).save(out / f"{i:02d}_raw_agentview.png")
             Image.fromarray(obs["robot0_eye_in_hand_image"]).save(out / f"{i:02d}_raw_wrist.png")
             # 実際にモデルへ入る画像（FLIP_IMAGES_180 適用後）
-            for name, key in (("front", self.KEY_MAIN), ("wrist", self.KEY_WRIST)):
+            fed = [("front", self.key_main)]
+            if self.key_wrist:
+                fed.append(("wrist", self.key_wrist))
+            for name, key in fed:
                 t = batch[key][0].permute(1, 2, 0).cpu().numpy()
                 Image.fromarray((t * 255).clip(0, 255).astype(np.uint8)).save(
                     out / f"{i:02d}_fed_{name}.png"
