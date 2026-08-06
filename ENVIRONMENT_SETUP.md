@@ -31,13 +31,34 @@
 - SmolVLA による action chunk 推論（推論 0.24 秒、10 秒制限に対し 40 倍の余裕）
 - 実モデルを使った Track 1 公開 4 タスクの評価
 
+- 提出 ZIP 内だけで完結する VLM バックボーンの同梱（オフライン検証で証明済み）
+- 提出 ZIP のビルド（`tools/make_submission.sh`）
+
 ### 未完了のもの
 
-- 提出 ZIP 内だけで完結する VLM バックボーンの同梱（**提出の前提条件**）
 - 成功率の改善（追加学習）
 
-実モデルでの評価は完走するが、公開 4 タスクの成功率は 0% である。配線は
-実測で全項目を裏付けた（16.1）ので、残るのはモデルの能力の問題である。
+**提出可能な状態には到達している。** HF キャッシュを隠した状態
+（`HF_HOME=/tmp/empty_hf_home HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1`）で
+`validate_submission.py submission.zip` が PASS することを確認済み。
+zip は 2.1GB、推論レイテンシは mean 0.11 / max 0.33 秒（制限 10 秒）。
+
+残るのは成功率で、公開 4 タスクは 0% である。配線は実測で全項目を
+裏付けた（16.1）ので、残るのはモデルの能力の問題である。
+
+### 外部通信への依存は 2 箇所あった
+
+オフライン化で最も嵌まった点なので記録しておく。バックボーンを同梱して
+`config.json` の `vlm_model_name` を直すだけでは**不十分**である。
+
+| 箇所 | 値 | 対処 |
+|---|---|---|
+| `config.json` の `vlm_model_name` | `HuggingFaceTB/SmolVLM2-500M-Video-Instruct` | `_load_model()` がローカルパスへ差し替え |
+| `policy_preprocessor.json` の `tokenizer_processor.tokenizer_name` | 同上（**別経路**） | `preprocessor_overrides` で差し替え |
+
+2 つ目は `AutoTokenizer.from_pretrained()` が独自にハブを見に行くもので、
+`LocalEntryNotFoundError` で起動に失敗する。**HF キャッシュが見える状態では
+再現しない**ため、`HF_HOME` を空にした検証でしか捕捉できない。
 
 ---
 
@@ -900,22 +921,22 @@ pgrep -af 'policy_server.py|uvicorn'
 
 配線は完了し実測で裏付けた。残りは 2 つである。
 
-### A. VLM バックボーンの同梱（提出の前提条件・成功率とは独立）
+### A. 提出可能な状態の維持（完了）
 
-これを済ませない限り、成功率がいくら出ても採点環境では起動段階で落ちる。
-
-```bash
-cd ~/PARC2026_pre/submission
-hf download HuggingFaceTB/SmolVLM2-500M-Video-Instruct --local-dir smolvlm_backbone
-```
-
-`policy_server.py` は `smolvlm_backbone/` があれば `vlm_model_name` を自動で
-そこへ差し替える。HF キャッシュを隠して検証すること。
+`tools/make_submission.sh` が zip を作る。不要物（`__pycache__` / `.cache` /
+`onnx/` / `eval/` の動画 / `*.gguf` 等）を落とし、zip 直下が
+`policy_server.py` になる構成で固める。backbone は onnx 除去で
+5.88GB から 1.9GB になった。
 
 ```bash
+bash tools/make_submission.sh
 HF_HOME=/tmp/empty_hf_home HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
-  python policy_server.py --port 8002
+  /opt/home/ohara/miniforge3/envs/parc-policy/bin/python validate_submission.py submission.zip
 ```
+
+`validate_submission.py` はサーバーを `sys.executable` で起動する（:554）。
+評価用 venv の python から実行すると lerobot が見つからず失敗するので、
+parc-policy の python をフルパスで指定すること。
 
 ### B. 成功率の改善（追加学習）
 
