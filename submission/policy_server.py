@@ -77,7 +77,29 @@ _BACKBONE_DIR = _HERE / "smolvlm_backbone"
 
 # --- 切り分け用の計装（PARC_DEBUG_DIR を設定したときだけ有効。既定は完全に無効）---
 _DEBUG_DIR = os.environ.get("PARC_DEBUG_DIR")
-_DEBUG_MAX = int(os.environ.get("PARC_DEBUG_MAX", "3"))
+
+
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    """環境変数を整数で読む。不正値は既定へ落として警告する。
+
+    実験用のつまみを環境変数で振れるようにするためのもの。値が壊れていても
+    サーバーが起動しないより既定で動くほうがよい（提出時は未設定なので既定）。
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        v = int(raw)
+    except ValueError:
+        print(f"[MyPolicy] {name}={raw!r} を整数として読めない。既定 {default} を使う。")
+        return default
+    if v < minimum:
+        print(f"[MyPolicy] {name}={v} は下限 {minimum} 未満。{minimum} に切り上げる。")
+        return minimum
+    return v
+
+
+_DEBUG_MAX = _env_int("PARC_DEBUG_MAX", 3)
 
 
 class MyPolicy(BasePolicy):
@@ -140,8 +162,16 @@ class MyPolicy(BasePolicy):
     ACTION_CHUNK_SIZE = 50
 
     #: 生成したチャンクのうち実際に環境へ流すステップ数。
-    #: 小さくすると推論頻度が上がり閉ループ性が増す（衝突対策の調整点）。
-    N_ACTION_EXEC = 50
+    #: 小さくすると再推論の頻度が上がり閉ループ性が増す。open-loop 区間が
+    #: 長いほど、対象外の物体へ接触する余地が増える（衝突判定は 1mm）。
+    #:
+    #: 50 は学習時と同じ設定で、1 ステップ 0.05 秒なので 2.5 秒ぶんを
+    #: 目を閉じて実行することになる。推論は 1 回 0.24 秒、制限は 10 秒なので
+    #: 下げる余地は大きい。600 ステップのエピソードでの推論回数と所要:
+    #:     50 -> 12 回 / 2.9 秒、25 -> 24 回 / 5.8 秒、10 -> 60 回 / 14 秒
+    #:
+    #: A/B 用に PARC_N_EXEC で上書きできる。既定（未設定）は 50。
+    N_ACTION_EXEC = _env_int("PARC_N_EXEC", 50)
 
     def __init__(self):
         self.instruction = ""
