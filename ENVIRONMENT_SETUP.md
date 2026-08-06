@@ -876,15 +876,33 @@ submission/smolvlm_backbone/
 
 ### ターミナル A: ポリシーサーバー
 
-```bash
-conda activate parc-policy
-cd ~/PARC2026_pre/submission
+`tools/run_policy_server.sh` を使う。現在のシェルの状態に依存せず
+parc-policy の python で起動するので、`(venv)` が残っていても構わない。
 
-HF_HUB_OFFLINE=1 \
-TRANSFORMERS_OFFLINE=1 \
-CUDA_VISIBLE_DEVICES=0 \
-TOKENIZERS_PARALLELISM=false \
-python policy_server.py --host 127.0.0.1 --port 8002
+```bash
+cd ~/PARC2026_pre
+bash tools/run_policy_server.sh
+```
+
+このスクリプトが行うこと:
+
+- parc-policy の python を探して使う（`PARC_POLICY_PYTHON` で明示指定も可）
+- lerobot が入っていなければ起動前に明確なエラーで止める
+- `VIRTUAL_ENV` / `PYTHONPATH` / `LD_LIBRARY_PATH` を引き継がない。
+  `activate_parc.sh` は PYTHONPATH に LIBERO-plus を、LD_LIBRARY_PATH に
+  OSMesa と ImageMagick を入れるが、これらはポリシー側には不要で
+  conda 環境のライブラリと競合しうる
+- `HF_HUB_OFFLINE` / `TRANSFORMERS_OFFLINE` / `TOKENIZERS_PARALLELISM` /
+  `CUDA_VISIBLE_DEVICES` の既定を設定する
+
+実験用のつまみ:
+
+```bash
+PARC_N_EXEC=25   bash tools/run_policy_server.sh   # open-loop 区間の長さ
+PARC_FLIP180=0   bash tools/run_policy_server.sh   # 画像 180 度回転を無効化
+PARC_DEBUG_DIR=/tmp/parc_dbg bash tools/run_policy_server.sh   # 計装を有効化
+PARC_OFFLINE_TEST=1 bash tools/run_policy_server.sh  # HF キャッシュを隠す
+PARC_PORT=8003   bash tools/run_policy_server.sh
 ```
 
 ### ターミナル B: 評価パイプライン
