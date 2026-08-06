@@ -120,8 +120,8 @@ class MyPolicy(BasePolicy):
     #: LiberoProcessorStep (lerobot/processor/env_processor.py) が
     #: torch.flip(img, dims=[2, 3]) で行っているのと同じ変換である。
     #: state のレイアウトが同 Step の出力と一致することから同系統の変換と判断した。
-    #: 成功率が 0 のまま動かない場合は、まずここを False にして A/B すること。
-    FLIP_IMAGES_180 = True
+    #: A/B 用に PARC_FLIP180=0 で無効化できる。既定（未設定）は有効。
+    FLIP_IMAGES_180 = os.environ.get("PARC_FLIP180", "1") != "0"
 
     #: config.json の chunk_size / n_action_steps に一致させる
     ACTION_CHUNK_SIZE = 50
