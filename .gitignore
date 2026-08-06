@@ -1,6 +1,18 @@
 __pycache__/
 *.pyc
+.pytest_cache/
 results/
+logs/
 venv/
+
+# setup.sh が clone / 生成するもの
 LIBERO-plus/
+LIBERO/
 assets.zip
+env.sh
+
+# モデル重み。最終提出 zip には必要だが、リポジトリには入れない。
+# model.safetensors は約 865MiB あり GitHub の 100MB 制限に抵触する。
+submission/model_weights/
+submission/smolvlm_backbone/
+submission.zip
