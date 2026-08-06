@@ -18,6 +18,7 @@ submission_template/policy_server.py から派生した作業用の提出物で�
 """
 
 import argparse
+import os
 from abc import ABC, abstractmethod
 from collections import deque
 from pathlib import Path
@@ -73,6 +74,10 @@ class BasePolicy(ABC):
 _HERE = Path(__file__).resolve().parent
 _WEIGHTS_DIR = _HERE / "model_weights"
 _BACKBONE_DIR = _HERE / "smolvlm_backbone"
+
+# --- 切り分け用の計装（PARC_DEBUG_DIR を設定したときだけ有効。既定は完全に無効）---
+_DEBUG_DIR = os.environ.get("PARC_DEBUG_DIR")
+_DEBUG_MAX = int(os.environ.get("PARC_DEBUG_MAX", "3"))
 
 
 class MyPolicy(BasePolicy):
@@ -133,6 +138,8 @@ class MyPolicy(BasePolicy):
         self.preprocessor = None
         self.postprocessor = None
         self.state_dim = 8
+        self._dbg_n = 0
+        self._warming = False
         self.model = self._load_model()
         self._warmup()
 
@@ -231,6 +238,12 @@ class MyPolicy(BasePolicy):
             self.KEY_STATE: self._to_state(obs),
             "task": [self.instruction],
         }
+        dumping = (
+            bool(_DEBUG_DIR) and not self._warming and self._dbg_n < _DEBUG_MAX
+        )
+        if dumping:
+            self._dump_inputs(obs, batch)
+
         batch = self.preprocessor(batch)
         with torch.inference_mode():
             chunk = self.model.predict_action_chunk(batch)   # (1, chunk, 7)
@@ -239,7 +252,87 @@ class MyPolicy(BasePolicy):
         arr = np.asarray(chunk.squeeze(0).float().cpu().numpy(), dtype=np.float32)
         if arr.ndim != 2 or arr.shape[1] != 7:
             raise RuntimeError(f"予期しない chunk shape: {arr.shape}（期待 (N, 7)）")
+
+        if dumping:
+            self._dump_outputs(batch, arr)
+            self._dbg_n += 1
         return arr
+
+    # ------------------------------------------------------------
+    # 切り分け用の計装。PARC_DEBUG_DIR を設定したときだけ動く。
+    # 提出時の挙動には一切影響しない（環境変数が無ければ全て素通り）。
+    # ------------------------------------------------------------
+
+    def _dump_inputs(self, obs, batch) -> None:
+        try:
+            out = Path(_DEBUG_DIR)
+            out.mkdir(parents=True, exist_ok=True)
+            i = self._dbg_n
+
+            from PIL import Image
+            # 環境から届いた生画像
+            Image.fromarray(obs["agentview_image"]).save(out / f"{i:02d}_raw_agentview.png")
+            Image.fromarray(obs["robot0_eye_in_hand_image"]).save(out / f"{i:02d}_raw_wrist.png")
+            # 実際にモデルへ入る画像（FLIP_IMAGES_180 適用後）
+            for name, key in (("front", self.KEY_MAIN), ("wrist", self.KEY_WRIST)):
+                t = batch[key][0].permute(1, 2, 0).cpu().numpy()
+                Image.fromarray((t * 255).clip(0, 255).astype(np.uint8)).save(
+                    out / f"{i:02d}_fed_{name}.png"
+                )
+
+            state = batch[self.KEY_STATE][0].cpu().numpy()
+            lines = [
+                f"instruction = {self.instruction!r}",
+                f"state (raw) = {np.round(state, 4).tolist()}",
+            ]
+            # 学習データの統計と突き合わせる（(x-mean)/std が ±3 を大きく超えたら分布外）
+            stats = self._state_stats()
+            if stats is not None:
+                mean, std = stats
+                z = (state - mean) / (std + 1e-8)
+                lines += [
+                    f"stats mean  = {np.round(mean, 4).tolist()}",
+                    f"stats std   = {np.round(std, 4).tolist()}",
+                    f"z-score     = {np.round(z, 2).tolist()}",
+                    f"max|z|      = {float(np.max(np.abs(z))):.2f}"
+                    "   ← 3 を大きく超えるなら state が学習分布の外",
+                ]
+            (out / f"{i:02d}_state.txt").write_text("\n".join(lines) + "\n")
+            print(f"[MyPolicy][debug] {out}/{i:02d}_* を書き出した max|z| 判定は state.txt 参照")
+        except Exception as exc:
+            print(f"[MyPolicy][debug] 入力ダンプに失敗: {exc}")
+
+    def _dump_outputs(self, processed_batch, chunk: np.ndarray) -> None:
+        try:
+            out = Path(_DEBUG_DIR)
+            i = self._dbg_n
+            lines = [
+                f"chunk shape = {chunk.shape}",
+                f"chunk[0]    = {np.round(chunk[0], 4).tolist()}",
+                f"chunk[-1]   = {np.round(chunk[-1], 4).tolist()}",
+                f"per-dim min = {np.round(chunk.min(axis=0), 4).tolist()}",
+                f"per-dim max = {np.round(chunk.max(axis=0), 4).tolist()}",
+                f"per-dim std = {np.round(chunk.std(axis=0), 4).tolist()}",
+                f"|xyz| 平均  = {float(np.mean(np.abs(chunk[:, :3]))):.4f}"
+                "   ← 0.01 未満ならほぼ静止指令",
+                f"gripper     = {np.round(chunk[:, 6], 3).tolist()}",
+            ]
+            (out / f"{i:02d}_action.txt").write_text("\n".join(lines) + "\n")
+        except Exception as exc:
+            print(f"[MyPolicy][debug] 出力ダンプに失敗: {exc}")
+
+    def _state_stats(self):
+        """normalizer が持つ observation.state の mean / std を numpy で返す。"""
+        try:
+            for step in getattr(self.preprocessor, "steps", []):
+                stats = getattr(step, "_tensor_stats", None)
+                if stats and self.KEY_STATE in stats:
+                    s = stats[self.KEY_STATE]
+                    return (s["mean"].float().cpu().numpy(),
+                            s["std"].float().cpu().numpy())
+        except Exception:
+            pass
+        return None
 
     def _to_image(self, hwc_uint8: np.ndarray):
         """uint8 HWC -> float32 (1, 3, H, W) [0, 1]、必要なら 180 度回転。
@@ -325,6 +418,7 @@ class MyPolicy(BasePolicy):
             "robot0_eef_quat": np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64),
             "robot0_gripper_qpos": np.zeros(2, dtype=np.float64),
         }
+        self._warming = True   # warmup のダミー観測はデバッグダンプの対象外
         try:
             for _ in range(2):
                 self._queue.clear()
@@ -332,6 +426,7 @@ class MyPolicy(BasePolicy):
         except Exception as exc:
             print(f"[MyPolicy] warmup に失敗（無視して続行）: {exc}")
         finally:
+            self._warming = False
             self.reset("")
 
 
