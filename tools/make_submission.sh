@@ -31,6 +31,9 @@ find "$SRC" -type d -name 'onnx'  -prune -exec rm -rf {} + 2>/dev/null || true
 find "$SRC" -type f \( -name '*.gguf' -o -name '*.onnx' -o -name '*.onnx_data' \
                     -o -name 'tf_model.h5' -o -name 'flax_model.msgpack' \
                     -o -name 'pytorch_model.bin' \) -delete 2>/dev/null || true
+# checkpoint に同梱される評価成果物（推論には不要）
+find "$SRC" -type d \( -name 'eval' -o -name 'runs' \) -prune -exec rm -rf {} + 2>/dev/null || true
+find "$SRC" -type f \( -name '*.mp4' -o -name '*.webm' -o -name '*.gif' \) -delete 2>/dev/null || true
 
 echo "== 構成 =="
 du -sh "$SRC"
@@ -54,6 +57,22 @@ echo "$OUT: $(du -h "$OUT" | cut -f1)"
 echo
 echo "== zip 直下の確認 =="
 unzip -l "$OUT" | head -15
+
+# validate_submission.py は sys.executable でサーバーを起動する (:554)。
+# つまり validate を動かす python に lerobot が入っていないと必ず失敗する。
+PY_HINT="python"
+if [ -n "${CONDA_PREFIX:-}" ] && [ -x "$CONDA_PREFIX/bin/python" ]; then
+    PY_HINT="$CONDA_PREFIX/bin/python"
+fi
+
 echo
+if [ -n "${VIRTUAL_ENV:-}" ]; then
+    echo "警告: VIRTUAL_ENV=$VIRTUAL_ENV が有効になっている。"
+    echo "      評価用 venv と parc-policy が重なっていると、表示に関わらず"
+    echo "      venv 側の python が使われる（ENVIRONMENT_SETUP.md 3）。"
+    echo "      検証は下のフルパスで実行すること。"
+fi
 echo "次のコマンドで検証すること:"
-echo "  python validate_submission.py $OUT"
+echo "  $PY_HINT validate_submission.py $OUT"
+echo "  ※ validate はサーバーを sys.executable で起動する"
+echo "    (validate_submission.py:554)。lerobot が入った python を使うこと。"
