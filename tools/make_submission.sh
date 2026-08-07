@@ -62,7 +62,12 @@ rm -f "$OUT"
 echo "$OUT: $(du -h "$OUT" | cut -f1)"
 echo
 echo "== zip 直下の確認 =="
-unzip -l "$OUT" | head -15
+# unzip -l | head だと head が閉じた時点で unzip が SIGPIPE で死に、
+# set -o pipefail がそれを拾ってスクリプトごと終了する。
+# 実際にそれで後続の verify_clean_env.sh が実行されなかった。
+# 一度変数に受けてから切り詰める。
+listing="$(unzip -l "$OUT")"
+printf '%s\n' "$listing" | head -20
 
 # validate_submission.py は sys.executable でサーバーを起動する (:554)。
 # つまり validate を動かす python に lerobot が入っていないと必ず失敗する。
