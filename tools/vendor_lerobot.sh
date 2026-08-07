@@ -3,6 +3,12 @@
 # lerobot を submission/vendor/ へ同梱し、requirements.txt を
 # 「wheel のある依存だけ」に作り直す。
 #
+# submission/vendor/ と submission/requirements.txt はこのスクリプトの
+# 生成物で、git 管理外である。管理下に置くと、再生成のたびに作業ツリーが
+# 汚れて git pull が
+#   error: Your local changes to the following files would be overwritten
+# で止まる。実際にそれで修正が反映されないまま古いスクリプトが動いた。
+#
 #   bash tools/vendor_lerobot.sh
 #
 # なぜ同梱するのか:

@@ -19,3 +19,4 @@ submission.zip
 .sweep.lock
 .sweep.pid
 submission/vendor/
+submission/requirements.txt

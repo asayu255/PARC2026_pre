@@ -17,7 +17,13 @@ DRY=0
 [ "${1:-}" = "--dry-run" ] && DRY=1
 
 test -f "$SRC/policy_server.py"  || { echo "ERROR: $SRC/policy_server.py が無い" >&2; exit 1; }
-test -f "$SRC/requirements.txt"  || { echo "ERROR: $SRC/requirements.txt が無い" >&2; exit 1; }
+# requirements.txt と vendor/ は tools/vendor_lerobot.sh が作る生成物であり
+# git 管理外である（管理下に置くと再生成のたびに pull が衝突する）。
+if [ ! -f "$SRC/requirements.txt" ] || [ ! -d "$SRC/vendor" ]; then
+    echo "ERROR: $SRC/requirements.txt または $SRC/vendor が無い。" >&2
+    echo "       先に実行すること: bash tools/vendor_lerobot.sh" >&2
+    exit 1
+fi
 
 echo "== 不要物を削除 =="
 # 実行時に不要で、サイズだけ食うもの
