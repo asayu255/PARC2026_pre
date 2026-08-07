@@ -19,6 +19,7 @@ submission_template/policy_server.py から派生した作業用の提出物で�
 
 import argparse
 import os
+import time
 from abc import ABC, abstractmethod
 from collections import deque
 from pathlib import Path
@@ -180,6 +181,12 @@ class MyPolicy(BasePolicy):
     #: A/B 用に PARC_N_EXEC で上書きできる。既定（未設定）は 10。
     N_ACTION_EXEC = _env_int("PARC_N_EXEC", 10)
 
+    #: この秒数を超えた /act を警告する。評価側の打ち切りは 10 秒で、
+    #: 1 回でも超えるとトラック全体が 0 点になる（README のタイムアウト仕様）。
+    #: 推論は実測 0.24 秒だが、n_exec=50 の評価で 10 秒超のストールが実際に
+    #: 起きてトラックが落ちた。外れ値を取りこぼさないよう常時計測する。
+    SLOW_REQUEST_SEC = float(os.environ.get("PARC_SLOW_SEC", "2.0"))
+
     def __init__(self):
         self.instruction = ""
         self._queue: deque[np.ndarray] = deque()
@@ -193,6 +200,10 @@ class MyPolicy(BasePolicy):
         self._dbg_n = 0
         self._trace_i = 0
         self._warming = False
+        self._lat_max = 0.0
+        self._lat_sum = 0.0
+        self._lat_n = 0
+        self._lat_slow = 0
         self.model = self._load_model()
         self._warmup()
 
@@ -589,6 +600,7 @@ class MyPolicy(BasePolicy):
     # ------------------------------------------------------------
 
     def get_action(self, obs: dict[str, np.ndarray]) -> np.ndarray:
+        t0 = time.perf_counter()
         if _DEBUG_DIR and not self._warming:
             self._trace_step(obs)
         if not self._queue:
@@ -597,11 +609,44 @@ class MyPolicy(BasePolicy):
             if chunk.shape[0] == 0:
                 raise RuntimeError("_predict_chunk() が空の action を返した。")
             self._queue.extend(chunk[: max(1, self.N_ACTION_EXEC)])
-        return self._sanitize(self._queue.popleft())
+        action = self._sanitize(self._queue.popleft())
+        if not self._warming:
+            self._record_latency(time.perf_counter() - t0)
+        return action
+
+    def _record_latency(self, dt: float) -> None:
+        """/act の所要時間を記録し、遅い応答をその場で報告する。
+
+        評価側は 1 リクエスト 10 秒で打ち切り、超えるとトラック全体が
+        0 点になる。平均ではなく最悪値が効くので、外れ値を必ず残す。
+        """
+        self._lat_n += 1
+        self._lat_sum += dt
+        if dt > self._lat_max:
+            self._lat_max = dt
+        if dt > self.SLOW_REQUEST_SEC:
+            self._lat_slow += 1
+            print(
+                f"[MyPolicy] 遅い /act: {dt:.2f}s"
+                f" (これまでの最大 {self._lat_max:.2f}s"
+                f" / {self._lat_n} リクエスト目 / 遅延 {self._lat_slow} 回)"
+                " ★10 秒でトラックが 0 点になる",
+                flush=True,
+            )
 
     def reset(self, instruction: str = "") -> None:
         # エピソード境界。チャンクのキャッシュを持ち越すと、前エピソードの
         # action が次エピソードの冒頭に流れ込んで衝突の原因になる。
+        if self._lat_n:
+            print(
+                f"[MyPolicy] 前エピソードのレイテンシ: n={self._lat_n}"
+                f" mean={self._lat_sum / self._lat_n:.3f}s max={self._lat_max:.3f}s"
+                f" slow(>{self.SLOW_REQUEST_SEC:g}s)={self._lat_slow}",
+                flush=True,
+            )
+        self._lat_max = self._lat_sum = 0.0
+        self._lat_n = self._lat_slow = 0
+
         self.instruction = instruction
         self._queue.clear()
         if self.model is not None:
