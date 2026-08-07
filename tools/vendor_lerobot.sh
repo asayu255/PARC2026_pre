@@ -47,7 +47,10 @@ echo "[vendor] 配置: $DEST/lerobot  ($(du -sh "$DEST" | cut -f1))"
 # 推論の import 連鎖に現れる第三者パッケージ（静的解析で確定）。
 # import 名 -> pip 名。バージョンは動作実績のある parc-policy に合わせて固定する。
 # この一覧は lerobot の import 連鎖を静的解析して作った。entry は
-# modeling_smolvla / configs.policies / processor の 3 つで、61 モジュールに到達する。
+# policy_server.py が実際に import するものと一致させること:
+#   lerobot / lerobot.policies.factory /
+#   lerobot.policies.smolvla.modeling_smolvla / lerobot.configs.policies
+# （factory を entry に入れ忘れて gymnasium を落とした）。75 モジュールに到達する。
 # ただし静的解析は関数内の遅延 import を追えないため、最終的な正解は
 # tools/verify_clean_env.sh（まっさらな venv で実際に起動する）である。
 #
@@ -59,7 +62,7 @@ echo "[vendor] 配置: $DEST/lerobot  ($(du -sh "$DEST" | cut -f1))"
 PKGS="torch torchvision torchcodec transformers safetensors huggingface_hub \
 accelerate diffusers datasets pyarrow pandas fsspec av imageio pillow \
 draccus packaging numpy typing_extensions einops termcolor tqdm \
-pyserial jsonlines deepdiff"
+pyserial gymnasium jsonlines deepdiff"
 
 {
     echo "# ポリシーサーバーの依存（必須、削除しないでください）"
