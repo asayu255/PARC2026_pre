@@ -34,13 +34,43 @@
 - 提出 ZIP 内だけで完結する VLM バックボーンの同梱（オフライン検証で証明済み）
 - 提出 ZIP のビルド（`tools/make_submission.sh`）
 
-- N_ACTION_EXEC の調整（50 -> 10 で成功率 0.00 -> 0.80）
+- N_ACTION_EXEC の調整（50 -> 10）
+- 公開 4 タスクでの評価: **総合 87.5%**（各 10 エピソード、追加学習なし）
+
+| タスク | 難易度 | 成功率 | 平均ステップ |
+|---|---|---|---|
+| black bowl in top drawer -> plate | L3 | 80% | 131.8 |
+| tomato sauce -> basket | L5 | 90% | 229.9 |
+| milk -> basket | L2 | 100% | 153.6 |
+| bowl -> stove | L4 | 80% | 90.2 |
+| **総合** | | **87.5%** | |
+
+40 エピソード・63 分を通してタイムアウトは発生しなかった。
 
 ### 未完了のもの
 
-- 公開 4 タスクでの確認（上記は 1 タスクでの測定）
-- N_ACTION_EXEC を 10 より下げた場合の確認
+- N_ACTION_EXEC を 10 より下げた場合の確認（5 / 2 / 1）
+- レイテンシ外れ値の特性把握（下記）
 - 成功率のさらなる改善（追加学習）
+
+### 注意: /act の 10 秒タイムアウトは実際に起きた
+
+n_exec=50 の評価で /act が 10 秒を超え、トラック全体が 0 点になった。
+
+    requests.exceptions.ReadTimeout: read timeout=10.0
+    -> track1: 総合スコア 0.000
+
+推論は実測 0.24 秒、スモークテストでも max 0.33 秒である。40 倍の外れ値で、
+n_exec=25 / 10 は推論回数が 2 倍・5 倍多いのに起きていないため、系統的な
+遅さではなく単発のストールと考えられる（GPU 競合・NFS・メモリ圧が候補）。
+
+成功率をいくら上げても、これが 1 回起きればトラックは 0 点になる。
+policy_server.py は常時レイテンシを計測し、SLOW_REQUEST_SEC（既定 2 秒、
+PARC_SLOW_SEC で変更可）を超えた /act をその場で警告し、エピソードごとに
+n / mean / max / slow を出す。評価のたびにサーバーログを確認すること。
+
+    grep -c '遅い /act' logs/server_full.log
+    grep 'レイテンシ' logs/server_full.log
 
 **提出可能な状態には到達している。** HF キャッシュを隠した状態
 （`HF_HOME=/tmp/empty_hf_home HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1`）で
