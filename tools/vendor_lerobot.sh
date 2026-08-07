@@ -33,16 +33,69 @@ if [ -z "$PY" ]; then
 fi
 [ -x "$PY" ] || { echo "ERROR: parc-policy の python が見つからない。PARC_POLICY_PYTHON を指定すること。" >&2; exit 1; }
 
-SRC="$("$PY" -c 'import lerobot, pathlib; print(pathlib.Path(lerobot.__file__).parent)')"
-VER="$("$PY" -c 'import lerobot; print(lerobot.__version__)' 2>/dev/null || echo unknown)"
-echo "[vendor] lerobot $VER : $SRC"
+# 同梱するモジュール。いずれも純 Python で、pip では入れられない
+# （または入れると採点環境で失敗する）もの。
+#   lerobot   : 必須依存 pynput -> evdev が wheel 無しでソースビルドになる
+#   num2words : transformers の SmolVLM プロセッサが要求する。
+#               依存の docopt に wheel が無い
+#   docopt    : 上記の依存。wheel が一切公開されていない
+VENDOR_MODULES="${PARC_VENDOR_MODULES:-lerobot num2words docopt}"
 
 DEST="submission/vendor"
 rm -rf "$DEST"; mkdir -p "$DEST"
-cp -r "$SRC" "$DEST/lerobot"
+
+for mod in $VENDOR_MODULES; do
+    loc="$("$PY" - "$mod" <<'PYX'
+import importlib.util, pathlib, sys
+spec = importlib.util.find_spec(sys.argv[1])
+if spec is None or not spec.origin:
+    print(""); raise SystemExit
+p = pathlib.Path(spec.origin)
+# パッケージなら __init__.py の親、単一モジュールならそのファイル
+print(p.parent if p.name == "__init__.py" else p)
+PYX
+)"
+    if [ -z "$loc" ] || [ ! -e "$loc" ]; then
+        echo "[vendor] ERROR: $mod が $PY に見つからない。" >&2
+        echo "         conda activate parc-policy して pip install しておくこと。" >&2
+        exit 1
+    fi
+    ver="$("$PY" - "$mod" <<'PYX'
+import sys
+from importlib.metadata import version, PackageNotFoundError
+try: print(version(sys.argv[1]))
+except PackageNotFoundError: print("?")
+PYX
+)"
+    cp -r "$loc" "$DEST/"
+
+    # dist-info も持っていく。transformers の is_xxx_available() は
+    # importlib.metadata.version() で有無を判定することがあり、
+    # メタデータが無いと同梱していても「未インストール」と見なされる。
+    # importlib.metadata は sys.path 上の *.dist-info を探すので、
+    # vendor/ に置けば認識される。
+    di="$("$PY" - "$mod" <<'PYX'
+import sys
+from importlib.metadata import distribution, PackageNotFoundError
+try:
+    d = distribution(sys.argv[1])
+    p = getattr(d, "_path", None)
+    print(p if p else "")
+except PackageNotFoundError:
+    print("")
+PYX
+)"
+    if [ -n "$di" ] && [ -d "$di" ]; then
+        cp -r "$di" "$DEST/"
+        echo "[vendor] $mod $ver <- $loc  (+ $(basename "$di"))"
+    else
+        echo "[vendor] $mod $ver <- $loc  (dist-info 無し)"
+    fi
+done
+
 find "$DEST" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 find "$DEST" -name '*.pyc' -delete 2>/dev/null || true
-echo "[vendor] 配置: $DEST/lerobot  ($(du -sh "$DEST" | cut -f1))"
+echo "[vendor] 配置: $DEST ($(du -sh "$DEST" | cut -f1))"
 
 # 推論の import 連鎖に現れる第三者パッケージ（静的解析で確定）。
 # import 名 -> pip 名。バージョンは動作実績のある parc-policy に合わせて固定する。
@@ -55,8 +108,9 @@ echo "[vendor] 配置: $DEST/lerobot  ($(du -sh "$DEST" | cut -f1))"
 # tools/verify_clean_env.sh（まっさらな venv で実際に起動する）である。
 #
 # 除外したもの:
-#   num2words : lerobot 0.4.4 から一切参照されていない（extra の記載が残るだけ）。
-#               依存の docopt に wheel が無く、入れると検証で弾かれる。
+#   num2words / docopt : pip ではなく vendor/ に同梱する（上記 VENDOR_MODULES）。
+#               num2words は lerobot ではなく transformers の SmolVLM
+#               プロセッサが要求する。依存の docopt に wheel が無い。
 #   peft      : 解析には出るがクラスメソッド内の遅延 import のみ。
 #               parc-policy にも入っていないが推論は動いている（成功率 87.5%）。
 PKGS="torch torchvision torchcodec transformers safetensors huggingface_hub \
