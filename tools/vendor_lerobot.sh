@@ -40,9 +40,14 @@ echo "[vendor] 配置: $DEST/lerobot  ($(du -sh "$DEST" | cut -f1))"
 
 # 推論の import 連鎖に現れる第三者パッケージ（静的解析で確定）。
 # import 名 -> pip 名。バージョンは動作実績のある parc-policy に合わせて固定する。
+# 除外したもの:
+#   num2words : lerobot 0.4.4 から一切参照されていない（extra の記載が残るだけ）。
+#               依存の docopt に wheel が無く、入れると検証で弾かれる。
+#   peft      : 関数内の遅延 import のみ。parc-policy にも入っていないが
+#               推論は動いているので不要と確認済み。
 PKGS="torch torchvision torchcodec transformers safetensors huggingface_hub \
-accelerate peft diffusers datasets pyarrow pandas fsspec av imageio pillow \
-draccus packaging numpy typing_extensions einops num2words termcolor \
+accelerate diffusers datasets pyarrow pandas fsspec av imageio pillow \
+draccus packaging numpy typing_extensions einops termcolor \
 jsonlines deepdiff"
 
 {

@@ -34,7 +34,6 @@ packaging
 numpy
 typing_extensions
 einops
-num2words
 termcolor
 jsonlines
 deepdiff

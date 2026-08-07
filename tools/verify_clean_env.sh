@@ -59,12 +59,27 @@ echo
 echo "--- 1. requirements を wheel のみで導入（採点環境に Python.h は無い）---"
 if ! "$VPY" -m pip install --only-binary=:all: -r "$TMPREQ"; then
     echo
-    echo "★ 失敗。wheel の無いパッケージが含まれている。"
-    echo "  採点環境では C 拡張をビルドできないため、この状態では 0 点になる。"
-    echo "  どれに wheel が無いかは次で分かる:"
-    echo "    while read -r p; do case \"\$p\" in ''|'#'*) continue;; esac;"
-    echo "      $VPY -m pip download --only-binary=:all: --no-deps -d /tmp/w \"\$p\" >/dev/null 2>&1 \\"
-    echo "        || echo \"wheel なし: \$p\"; done < $TMPREQ"
+    echo "★ 失敗。wheel だけでは導入できない。"
+    echo "  どれに wheel が無いかを調べる..."
+    while read -r line; do
+        pkg="${line%%#*}"; pkg="$(echo "$pkg" | xargs)"
+        [ -z "$pkg" ] && continue
+        if ! "$VPY" -m pip download --only-binary=:all: --no-deps \
+                -d /tmp/parc_wheelprobe "$pkg" >/dev/null 2>&1; then
+            echo "    wheel なし: $pkg"
+        fi
+    done < "$TMPREQ"
+    rm -rf /tmp/parc_wheelprobe
+    echo
+    echo "  ここに出ないのに失敗する場合は、依存の依存に wheel が無い"
+    echo "  （エラー本文の 'No matching distribution found for X' を見ること）。"
+    echo
+    echo "  対処の順番:"
+    echo "    1. そのパッケージが本当に必要か確認する。不要なら"
+    echo "       tools/vendor_lerobot.sh の PKGS から外す"
+    echo "    2. 必要な場合、それが純 Python の sdist なら採点環境でも"
+    echo "       ビルドできる（Python.h が要るのは C 拡張だけ）。"
+    echo "       その判断で通すなら、この検証はここで止まる点に注意すること"
     rm -f "$TMPREQ"; exit 1
 fi
 rm -f "$TMPREQ"
