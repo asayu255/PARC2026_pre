@@ -76,6 +76,18 @@ _HERE = Path(__file__).resolve().parent
 _WEIGHTS_DIR = _HERE / "model_weights"
 _BACKBONE_DIR = _HERE / "smolvlm_backbone"
 
+# lerobot は pip では入れられないので同梱する。
+# lerobot の必須依存に pynput があり、Linux ではこれが evdev を引く。
+# evdev は wheel が一切公開されておらず必ずソースビルドになるが、
+# 採点環境には Python.h (python3-dev) が無いためコンパイルに失敗する。
+#
+#   pynput -> evdev -> C 拡張 -> fatal error: Python.h: No such file or directory
+#
+# 推論の import 連鎖に pynput/evdev は含まれない（lerobot が実機操作用に
+# 宣言しているだけ）。そこで lerobot 本体を vendor/ へ置き、requirements.txt
+# には wheel のある依存だけを列挙する。
+_VENDOR_DIR = _HERE / "vendor"
+
 # --- 切り分け用の計装（PARC_DEBUG_DIR を設定したときだけ有効。既定は完全に無効）---
 _DEBUG_DIR = os.environ.get("PARC_DEBUG_DIR")
 
@@ -224,6 +236,15 @@ class MyPolicy(BasePolicy):
             )
             return None
 
+        # 同梱した lerobot を優先する。site-packages に別バージョンが
+        # 入っていても、こちらが先に解決される。
+        if _VENDOR_DIR.is_dir():
+            import sys
+            v = str(_VENDOR_DIR)
+            if v not in sys.path:
+                sys.path.insert(0, v)
+            print(f"[MyPolicy] vendor: {_VENDOR_DIR}")
+
         import torch
         from lerobot.configs.policies import PreTrainedConfig
         from lerobot.policies.factory import make_pre_post_processors
@@ -250,6 +271,9 @@ class MyPolicy(BasePolicy):
             str(_WEIGHTS_DIR), config=cfg, local_files_only=True
         )
         model = model.eval().to(self.device)
+
+        import lerobot
+        print(f"[MyPolicy] lerobot: {Path(lerobot.__file__).parent}")
 
         self.preprocessor, self.postprocessor = make_pre_post_processors(
             policy_cfg=cfg,

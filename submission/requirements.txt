@@ -2,9 +2,39 @@
 fastapi>=0.68
 uvicorn>=0.15
 msgpack>=1.0
-numpy>=1.19
 
-# SmolVLA (lerobot/smolvla_libero_plus) の推論に必要
-# 採点環境は外部通信を遮断するため、git+ や --index-url は使用できない。
-torch==2.10.0
-lerobot[smolvla]==0.4.4
+# SmolVLA の推論に必要な依存。
+# lerobot 自体は vendor/ に同梱してあるのでここには書かない。
+# lerobot を pip で入れると、その必須依存 pynput が Linux で evdev を引き、
+# evdev は wheel が無いためソースビルドになる。採点環境には Python.h
+# (python3-dev) が無いので必ず失敗する。実際にこれで 0 点になった。
+#
+# このファイルは tools/vendor_lerobot.sh が parc-policy の実バージョンで
+# 固定して再生成する。手で編集した場合は
+#     bash tools/verify_clean_env.sh
+# を必ず通すこと（wheel のみで導入できるかを確認する）。
+torch
+torchvision
+torchcodec
+transformers
+safetensors
+huggingface_hub
+accelerate
+peft
+diffusers
+datasets
+pyarrow
+pandas
+fsspec
+av
+imageio
+pillow
+draccus
+packaging
+numpy
+typing_extensions
+einops
+num2words
+termcolor
+jsonlines
+deepdiff

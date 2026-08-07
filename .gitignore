@@ -18,3 +18,4 @@ submission/smolvlm_backbone/
 submission.zip
 .sweep.lock
 .sweep.pid
+submission/vendor/
