@@ -34,9 +34,13 @@
 - 提出 ZIP 内だけで完結する VLM バックボーンの同梱（オフライン検証で証明済み）
 - 提出 ZIP のビルド（`tools/make_submission.sh`）
 
+- N_ACTION_EXEC の調整（50 -> 10 で成功率 0.00 -> 0.80）
+
 ### 未完了のもの
 
-- 成功率の改善（追加学習）
+- 公開 4 タスクでの確認（上記は 1 タスクでの測定）
+- N_ACTION_EXEC を 10 より下げた場合の確認
+- 成功率のさらなる改善（追加学習）
 
 **提出可能な状態には到達している。** HF キャッシュを隠した状態
 （`HF_HOME=/tmp/empty_hf_home HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1`）で
