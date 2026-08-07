@@ -52,11 +52,63 @@
     最悪値                 : 0.410s
     平均                   : 0.031-0.037s
 
+- 採点環境と同条件での検証（tools/verify_clean_env.sh が PASS）
+
 ### 未完了のもの
 
 - N_ACTION_EXEC を 10 より下げた場合の確認（5 / 2 / 1）
-- レイテンシ外れ値の特性把握（下記）
 - 成功率のさらなる改善（追加学習）
+
+### 採点環境に python3-dev が無い（1 回目の採点が 0 点になった原因）
+
+採点環境では C 拡張をソースビルドできない。
+
+    fatal error: Python.h: No such file or directory
+
+このため lerobot は pip で入れられない。必須依存の pynput が Linux で
+evdev を引き、evdev は wheel が一切公開されていない（sdist のみ）ため
+必ずビルドが走って失敗する。推論の import 連鎖に pynput/evdev は
+含まれておらず、lerobot が実機操作用に宣言しているだけである。
+
+対策として、pip で入れられない純 Python のパッケージを同梱する。
+
+| 同梱するもの | 理由 |
+|---|---|
+| `lerobot` | 上記のとおり pip で入れられない |
+| `num2words` | transformers の SmolVLM プロセッサが要求する。lerobot は使わない |
+| `docopt` | num2words の依存。wheel が無い |
+
+`tools/vendor_lerobot.sh` が parc-policy からこれらをコピーし、
+requirements.txt を「wheel のある依存だけ」に再生成する。dist-info も
+一緒にコピーする（transformers の is_xxx_available() は
+importlib.metadata.version() で有無を判定するため）。
+
+`policy_server.py` は `_load_model()` で `vendor/` を sys.path の先頭へ挿す。
+
+### 提出前の検証（必ず通すこと）
+
+```bash
+bash tools/vendor_lerobot.sh
+bash tools/make_submission.sh
+bash tools/verify_clean_env.sh
+```
+
+`verify_clean_env.sh` が採点環境を再現する。
+
+| 再現する条件 | 方法 |
+|---|---|
+| まっさらな環境 | 新規 venv に requirements.txt だけを入れる |
+| Python.h が無い | `pip install --only-binary=:all:`（ソースビルドを一切許さない） |
+| HF キャッシュが無い | `HF_HOME` を空ディレクトリへ |
+| サーバーもその環境で起動 | その venv の python で validate_submission.py を実行 |
+
+作業環境で `validate_submission.py` を回すだけでは不十分である。必要な
+ものが既に入っている状態での検証にしかならない。実際、それでは PASS
+していたのに採点は 0 点だった。
+
+この検証を入れてから、依存まわりの不具合を 4 回ローカルで検出した
+（num2words の要否、pyserial / tqdm、gymnasium、num2words の再追加）。
+採点の消費は 1 回で済んでいる。
 
 ### 注意: /act の 10 秒タイムアウトは実際に起きた
 
