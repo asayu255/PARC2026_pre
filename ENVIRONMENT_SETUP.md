@@ -409,8 +409,7 @@ source activate_parc.sh
 - ユーザー領域の OSMesa
 - Conda 環境の ImageMagick
 - `LD_LIBRARY_PATH`
-- `MUJOCO_GL=osmesa`
-- `PYOPENGL_PLATFORM=osmesa`
+- `MUJOCO_GL` / `PYOPENGL_PLATFORM`（既定 `egl`）
 
 主な設定値:
 
@@ -418,10 +417,19 @@ source activate_parc.sh
 export PARC_OSMESA_ROOT="$HOME/.local/parc-osmesa/root"
 export PARC_OSMESA_LIB="$PARC_OSMESA_ROOT/usr/lib/x86_64-linux-gnu"
 export MAGICK_HOME="/opt/home/ohara/miniforge3/envs/parc-venv-bootstrap"
-export LD_LIBRARY_PATH="$PARC_OSMESA_LIB:$MAGICK_HOME/lib:${LD_LIBRARY_PATH:-}"
-export MUJOCO_GL=osmesa
-export PYOPENGL_PLATFORM=osmesa
+export PARC_RENDERER="${PARC_RENDERER:-egl}"
+export MUJOCO_GL="$PARC_RENDERER"
+export PYOPENGL_PLATFORM="$PARC_RENDERER"
 ```
+
+レンダラは `egl` が既定である（根拠は §24）。OSMesa に戻すには
+
+```bash
+PARC_RENDERER=osmesa source activate_parc.sh
+```
+
+`LD_LIBRARY_PATH` に `$PARC_OSMESA_LIB` を前置するのは `osmesa` のときだけである。
+OSMesa の `libGL` は EGL のそれと衝突するため、egl では前置しない。
 
 ### curl の警告
 
@@ -1260,45 +1268,74 @@ nohup bash tools/sweep_nexec.sh > "logs/sweep300_$$.log" 2>&1 &
 
 ---
 
-## 24. 次の一手: EGL でローカル再現を試す
+## 24. EGL 検証の結果: レンダラは原因ではない。ただし 7.7 倍速い
 
 採点は 8 エピソードで成功 0 本（§22.3）、ローカルの公開 4 タスクは
-300 step で 82.5%（§23）。この落差は「モデルが少し弱い」では出ない大きさで、
-入力が壊れている系の落差に近い。
+300 step で 82.5%（§23）。この落差はモデルの弱さでは出ない大きさなので、
+まず環境差のうちいちばん大きいレンダラ（採点 EGL / ローカル OSMesa）を疑い、
+ローカルを EGL に切り替えて同条件で回した。
 
-両者の環境差でいちばん大きいのは**レンダラ**である。採点は EGL / NVIDIA、
-ローカルは OSMesa（`activate_parc.sh:44-45`）。レンダラが違えば
-照明とテクスチャの見え方が変わり得る。SmolVLA は画像から動くので、
-ここが違えばそのまま性能差になる。
+### 24.1 成功率: 区別できない
 
-追加学習より圧倒的に安く（8 エピソードなら数分）、当たれば効果が大きいので、
-これを先にやる。
+公開 4 タスク × 2 エピソード（採点の 8 本に合わせた本数）、300 step、seed 42。
+
+| レンダラ | エピソード数 | 成功率 |
+|---|---|---|
+| OSMesa | 40（4 タスク × 10） | 82.5% |
+| **EGL** | 8（4 タスク × 2） | **62.5%**（100 / 50 / 50 / 50） |
+| 採点 | 8 | 成功 0 本 |
+
+2 エピソードだとタスクごとの値は 0 / 50 / 100 しか取り得ず、標準誤差は
+√(0.8×0.2/2) = 28 pt ある。62.5% と 82.5% は区別できない。
+**EGL でポリシーが壊れることはない。** レンダラ仮説は否定された。
+
+したがって採点で成功 0 本になった原因は、**採点タスクセットが公開 4 タスクとは
+別物で、かつ大幅に難しい**ことに帰着する。EGL で同じ 8 本構成を回して 5/8 成功する
+一方、採点は 0/8 である。
+
+### 24.2 EGL は 1 エピソードあたり 7.7 倍速い
+
+| レンダラ | 1 エピソードあたり |
+|---|---|
+| OSMesa | 83.7 秒（3348s / 40ep） |
+| EGL | **10.9 秒**（87.2s / 8ep） |
+
+これが今回いちばん大きい収穫である。測定コストの前提が変わる。
+§23.3 で「n_exec の差を有意に検出するには 1 条件 300 エピソード = 4 時間、
+2 条件で 8 時間」として諦めた計算が、**1 条件 55 分**になる。
+衝突率も実測で詰められる本数が回せるようになった。
+
+`activate_parc.sh` の既定を `egl` にした。OSMesa に戻すには
+`PARC_RENDERER=osmesa source activate_parc.sh`。
+
+なお採点環境は 8 エピソードで 192.7 秒（24 秒/ep）で、ローカル EGL より遅い。
+サーバー起動待ち 20 秒とモデルロードが含まれ、かつ採点側は 6/8 が
+300 step 完走している（ローカルは早期終了が多い）ためで、矛盾しない。
+
+---
+
+## 25. 残っている作業
+
+汎化以外の逃げ道が無くなった。優先順に 2 つ。
+
+### 25.1 衝突失敗を減らす（EGL で本数を稼いで測る）
+
+採点セットで到達できた 2 本は、どちらも 1 mm ルールで失格している（§22.3.1）。
+到達しても衝突すれば 0 点なので、ここは汎化とは独立に効く。
+
+EGL になったので、成功率ではなく**衝突率**を主指標にして本数を稼げる。
 
 ```bash
-cd ~/PARC2026_pre
-source activate_parc.sh
-
-# OSMesa の指定を EGL に差し替える。LD_LIBRARY_PATH の OSMesa も外す
-export MUJOCO_GL=egl
-export PYOPENGL_PLATFORM=egl
-export LD_LIBRARY_PATH="${LD_LIBRARY_PATH#$PARC_OSMESA_LIB:}"
-
-python -m pipeline --server-url http://127.0.0.1:8002 --track track1 \
-  --n-episodes 2 --max-steps 300 --timeout 10 --seed 42 \
-  --output-dir results/egl_2 2>&1 | tee logs/egl_2.log
+PARC_SWEEP_MAX_STEPS=300 PARC_SWEEP_EPISODES=50 PARC_SWEEP_NEXEC="10 5 2" \
+  nohup bash tools/sweep_nexec.sh > "logs/sweep_egl_$$.log" 2>&1 &
 ```
 
-`--n-episodes 2` は採点の 8 エピソード（4 タスク × 2）に合わせた本数である。
+50 エピソードなら衝突率の標準誤差は √(0.2×0.8/50) = 5.7 pt で、
+§23.3 の 10 エピソード（12.6 pt）とは判断できる範囲が違う。
 
-読み方:
+### 25.2 LoRA 追加学習
 
-- **成功率が OSMesa と同程度** → レンダラは無関係。汎化不足なので §21 B の追加学習へ
-- **成功率が大きく落ちる** → ギャップの主因がこれ。EGL での見え方に合わせるか、
-  EGL で追加学習データを作る方向になる
-
-EGL が使えない場合は `MUJOCO_GL=egl` で MuJoCo の初期化が失敗するので、
-その時点で分かる。
-
-画像そのものを比べるなら、両レンダラで `PARC_DEBUG_DIR` を指定して
-最初の数ステップの生画像をダンプし、並べて見るのが確実である（§16 の
-デバッグダンプ機構）。
+`examples/smolvla_libero_spatial_lora.ipynb` を出発点にする。
+採点タスクが不明（§22.2）なので、公開 4 タスクへの過適合ではなく
+摂動耐性を上げる構成にする必要がある。ベースモデルの学習タスクは
+40 種類のみ（`task_index.max=39`）で、PARC のタスクはその摂動版である。

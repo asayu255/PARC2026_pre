@@ -37,9 +37,21 @@ export PARC_OSMESA_LIB="$PARC_OSMESA_ROOT/usr/lib/x86_64-linux-gnu"
 # 別ホストで使う場合は、source する前に MAGICK_HOME を設定して上書きする。
 export MAGICK_HOME="${MAGICK_HOME:-/opt/home/ohara/miniforge3/envs/parc-venv-bootstrap}"
 
-# --- ユーザー領域の共有ライブラリを優先 --------------------------------------
-export LD_LIBRARY_PATH="$PARC_OSMESA_LIB:$MAGICK_HOME/lib:${LD_LIBRARY_PATH:-}"
+# --- レンダラ ----------------------------------------------------------------
+# 既定は egl。採点環境が EGL / NVIDIA であり（ENVIRONMENT_SETUP.md §22.4）、
+# かつ OSMesa のソフトウェアレンダリングより 1 エピソードあたり 7.7 倍速い
+# （83.7 秒 -> 10.9 秒、§24）。成功率は両者で区別できない範囲に収まっている。
+#
+# OSMesa に戻すには source する前に PARC_RENDERER=osmesa を指定する。
+#   PARC_RENDERER=osmesa source activate_parc.sh
+export PARC_RENDERER="${PARC_RENDERER:-egl}"
+export MUJOCO_GL="$PARC_RENDERER"
+export PYOPENGL_PLATFORM="$PARC_RENDERER"
 
-# --- 配布 Docker 環境と同じ OSMesa レンダリング ------------------------------
-export MUJOCO_GL=osmesa
-export PYOPENGL_PLATFORM=osmesa
+# --- ユーザー領域の共有ライブラリを優先 --------------------------------------
+# OSMesa の libGL は EGL のそれと衝突するので、osmesa のときだけ前に置く。
+if [ "$PARC_RENDERER" = "osmesa" ]; then
+    export LD_LIBRARY_PATH="$PARC_OSMESA_LIB:$MAGICK_HOME/lib:${LD_LIBRARY_PATH:-}"
+else
+    export LD_LIBRARY_PATH="$MAGICK_HOME/lib:${LD_LIBRARY_PATH:-}"
+fi
