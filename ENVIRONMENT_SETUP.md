@@ -1333,6 +1333,17 @@ PARC_SWEEP_MAX_STEPS=300 PARC_SWEEP_EPISODES=50 PARC_SWEEP_NEXEC="10 5 2" \
 50 エピソードなら衝突率の標準誤差は √(0.2×0.8/50) = 5.7 pt で、
 §23.3 の 10 エピソード（12.6 pt）とは判断できる範囲が違う。
 
+`nexec10` の結果（EGL・stove・50 エピソード・300 step・seed 42）:
+
+| 条件 | 成功率 | SE |
+|---|---|---|
+| OSMesa 10ep（§23 フル評価） | 80.0% | 12.6 pt |
+| OSMesa 10ep（§23.3 スイープ） | 70.0% | 14.5 pt |
+| **EGL 50ep** | **84.0%** | **5.2 pt** |
+
+10 エピソードで 70〜80 に振れていた同一条件が、50 本で 84.0% に落ち着いた。
+以降 stove の基準値はこれを使う。所要 329 秒。
+
 ### 25.2 LoRA 追加学習: データ構成の設計
 
 出発点は `examples/smolvla_libero_spatial_lora.ipynb`。仕組みは確認済みで、
@@ -1360,17 +1371,86 @@ LoRA は `--peft.method_type=LORA`、マージは `PeftModel.merge_and_unload()`
 デモデータは親タスク（無摂動）のものしか無いので、摂動耐性は
 **データの広さ**と**画像オーグメンテーション**で作るしかない。
 
+#### データセットの実測（`tools/inspect_dataset.py`）
+
+```text
+codebase_version: v3.0   total_episodes: 14347
+total_frames: 2238036    total_tasks: 40    fps: 20
+length: 平均 156.0  中央 138  最小 75  最大 505
+タスクあたり: 最小 146  中央 385  最大 500
+```
+
+`episodes` メタデータに**摂動を識別する列は無い**。列は `episode_index` /
+動画ポインタ / `tasks` / `length` と各特徴量の `stats` だけである。
+したがってメタデータからの層別サンプリングはできない。
+
+ただし `stats/observation.images.front/mean` から摂動の有無は判定できる。
+背景テクスチャと照明の摂動は画像の平均輝度を動かすからである。実測:
+
+| 指標 | 値 |
+|---|---|
+| 全体の平均輝度 | 0.4136（std 0.1201） |
+| 輝度の範囲 | **0.0856 〜 0.7231（8 倍）** |
+| タスク内 std の平均 | **0.1029**（全体 std の 86%） |
+
+ばらつきの 86% がタスク内で生じている。**摂動バリアントは実データに
+含まれている。** 1 タスク約 385 本という本数も、元の LIBERO の
+50 デモ/タスクに対して約 7.7 倍で、摂動条件 7〜8 種 × 50 デモという
+構成と整合する。
+
+この結果で設計方針が変わる。**オーグメンテーションで摂動を人工的に作る
+必要は薄く、実データを広く取ることが摂動網羅に直結する。**
+`image_transforms` は「学習カタログの外側の条件」への保険として残すが、
+主役ではない。
+
 #### 決定した構成（ノートブックとの差分）
 
 | 項目 | ノートブック | 今回 | 理由 |
 |---|---|---|---|
 | タスク | spatial 10 | **全 40 親タスク** | 採点は全スイートに及ぶ |
-| エピソード/タスク | 5 | **10**（均等間引き） | 計 400。過適合を薄める |
-| オーグメンテーション | なし | **`--dataset.image_transforms.enable=true`** | Light Conditions 摂動への直接の対策。明度・コントラスト・彩度・色相が入る |
-| steps | 3,000 | **20,000** | データが 8 倍。1 エピソード平均 ~250 frame として 400 ep で 2 epoch 弱 |
-| batch | 1（T4） | **VRAM が許す限り（8 から試す）** | wakaba のローカル GPU で回す |
-| LoRA r / α | 16 / 16 | **32 / 32** | データ量に合わせて容量を少し増やす |
+| エピソード/タスク | 5 | **60**（均等間引き） | 計 2,400 本 ≒ 374k frame。摂動条件 7〜8 種に各 7〜8 本当たる |
+| オーグメンテーション | なし | `image_transforms.enable=true`（弱め） | 実データに摂動があるので保険扱い |
+| steps | 3,000 | **15,000**（batch 32）| 480k サンプル ≒ 1.3 epoch。過適合を避ける |
+| batch | 1（T4） | **32**（A6000 48GB） | 1 枚で余裕がある |
+| LoRA r / α | 16 / 16 | **32 / 32** | データ量に合わせて容量を増やす |
 | lr | 3e-4 | **1e-4 → 1e-5 decay** | 長い学習に合わせて下げる |
+
+均等間隔で取る理由: このデータセットはタスクを round-robin で書き出して
+おり（`episode 0=task0, 1=task1, …`）、摂動条件も `episode_index` 方向に
+並んでいる可能性が高い。連続した塊で取ると 1 条件に偏る。
+
+#### ダウンロード量の注意
+
+`--dataset.episodes` は**使うエピソードを絞るだけ**で、必要な動画ファイルは
+各エピソードの `videos/observation.images.*/file_index` で決まる。
+round-robin 書き出しなので均等間隔で選ぶとほぼ全ての動画ファイルに触る。
+**本数を絞ってもダウンロード量は減らない。** 学習前に実サイズと
+ディスク残量を確認すること。
+
+```bash
+CONDA=/opt/home/ohara/miniforge3/envs/parc-policy
+$CONDA/bin/python - <<'PY'
+from collections import defaultdict
+from huggingface_hub import HfApi
+info = HfApi().dataset_info(
+    "lerobot/libero_plus",
+    revision="f3f49f426d75030177b18778374005bc12ccd588",
+    files_metadata=True,
+)
+by_kind = defaultdict(int)
+for f in info.siblings:
+    size = f.size or 0
+    kind = "videos" if f.rfilename.startswith("videos/") else \
+           "data" if f.rfilename.startswith("data/") else "meta/other"
+    by_kind[kind] += size
+total = sum(by_kind.values())
+for kind, size in sorted(by_kind.items()):
+    print(f"{kind:12s} {size / 2**30:8.2f} GiB")
+print(f"{'合計':12s} {total / 2**30:8.2f} GiB")
+PY
+
+df -h /opt/home/ohara
+```
 
 判定ゲート: 学習後、本リポジトリのパイプライン（EGL・128×128・300 step・
 公開 4 タスク × 10 ep）で **成功率 ≥ 82.5% かつ collision 悪化なし**なら採用。
