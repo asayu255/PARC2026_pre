@@ -1333,9 +1333,80 @@ PARC_SWEEP_MAX_STEPS=300 PARC_SWEEP_EPISODES=50 PARC_SWEEP_NEXEC="10 5 2" \
 50 エピソードなら衝突率の標準誤差は √(0.2×0.8/50) = 5.7 pt で、
 §23.3 の 10 エピソード（12.6 pt）とは判断できる範囲が違う。
 
-### 25.2 LoRA 追加学習
+### 25.2 LoRA 追加学習: データ構成の設計
 
-`examples/smolvla_libero_spatial_lora.ipynb` を出発点にする。
-採点タスクが不明（§22.2）なので、公開 4 タスクへの過適合ではなく
-摂動耐性を上げる構成にする必要がある。ベースモデルの学習タスクは
-40 種類のみ（`task_index.max=39`）で、PARC のタスクはその摂動版である。
+出発点は `examples/smolvla_libero_spatial_lora.ipynb`。仕組みは確認済みで、
+`lerobot/libero_plus` データセット（revision 固定）からタスク名で
+エピソードを選び、`lerobot-train --dataset.episodes=[...]` に渡す。
+LoRA は `--peft.method_type=LORA`、マージは `PeftModel.merge_and_unload()`。
+
+#### 設計の根拠
+
+`compe/t1/T1_TASKS.csv` が採点セットの性質を語っている。公開 4 タスクは
+
+| タスク | 親スイート | 摂動カテゴリ | 難度 | libero_plus_id |
+|---|---|---|---|---|
+| bowl_in_top_drawer_table_2 | libero_spatial | Background Textures | L3 | 80 |
+| tomato_sauce_table_27 | libero_object | Background Textures | L5 | 241 |
+| milk_light_15 | libero_object | Light Conditions | L2 | 2408 |
+| bowl_on_stove_light_11 | libero_goal | Light Conditions | L4 | 2467 |
+
+- 親スイートが 3 種にまたがる → 採点も全スイートに及ぶと考えるべき
+- `libero_plus_id` が 2467 まである → 採点プールは LIBERO-plus の
+  摂動バリアント空間（40 親タスク × 摂動の数千通り）
+- ベースモデルは 40 親タスクを知っている（`task_index.max=39`）のに
+  摂動版で失敗する → 足りないのはタスク知識ではなく**摂動耐性**
+
+デモデータは親タスク（無摂動）のものしか無いので、摂動耐性は
+**データの広さ**と**画像オーグメンテーション**で作るしかない。
+
+#### 決定した構成（ノートブックとの差分）
+
+| 項目 | ノートブック | 今回 | 理由 |
+|---|---|---|---|
+| タスク | spatial 10 | **全 40 親タスク** | 採点は全スイートに及ぶ |
+| エピソード/タスク | 5 | **10**（均等間引き） | 計 400。過適合を薄める |
+| オーグメンテーション | なし | **`--dataset.image_transforms.enable=true`** | Light Conditions 摂動への直接の対策。明度・コントラスト・彩度・色相が入る |
+| steps | 3,000 | **20,000** | データが 8 倍。1 エピソード平均 ~250 frame として 400 ep で 2 epoch 弱 |
+| batch | 1（T4） | **VRAM が許す限り（8 から試す）** | wakaba のローカル GPU で回す |
+| LoRA r / α | 16 / 16 | **32 / 32** | データ量に合わせて容量を少し増やす |
+| lr | 3e-4 | **1e-4 → 1e-5 decay** | 長い学習に合わせて下げる |
+
+判定ゲート: 学習後、本リポジトリのパイプライン（EGL・128×128・300 step・
+公開 4 タスク × 10 ep）で **成功率 ≥ 82.5% かつ collision 悪化なし**なら採用。
+公開 4 タスクは回帰ガードにしかならない（採点セットへの汎化は測れない）ことを
+忘れないこと。
+
+解像度ギャップ（学習 256×256 / PARC 128×128、`pipeline/config.py:51`）への
+対策として「128 に縮小してから戻す」劣化を学習時に入れる案があるが、
+lerobot の標準 transform には無くカスタム実装が要るので第 2 ラウンドに回す。
+
+#### 学習前に wakaba で確認すること
+
+```bash
+# 1. GPU の VRAM
+nvidia-smi --query-gpu=name,memory.total --format=csv
+
+# 2. parc-policy に lerobot-train と peft があるか
+/opt/home/ohara/miniforge3/envs/parc-policy/bin/python -c \
+  "import peft; print('peft', peft.__version__)"
+/opt/home/ohara/miniforge3/envs/parc-policy/bin/lerobot-train --help >/dev/null && echo "lerobot-train OK"
+
+# 3. データセットの各タスクのエピソード数（10/タスク取れるか）
+/opt/home/ohara/miniforge3/envs/parc-policy/bin/python - <<'PY'
+from collections import Counter
+from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
+md = LeRobotDatasetMetadata("lerobot/libero_plus",
+    revision="f3f49f426d75030177b18778374005bc12ccd588")
+counts = Counter()
+for cell in md.episodes["tasks"]:
+    name = cell if isinstance(cell, str) else str(cell[0])
+    counts[name] += 1
+print("タスク数:", len(counts))
+for name, n in sorted(counts.items()):
+    print(f"{n:4d}  {name}")
+PY
+```
+
+3 は全データのダウンロードは発生しない（メタデータのみ）。
+学習本体はデータセットの実体（動画）を落とすので、ディスク残量に注意する。
