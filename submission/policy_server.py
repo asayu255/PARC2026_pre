@@ -376,7 +376,9 @@ class MyPolicy(BasePolicy):
             )
 
         print(
-            f"[MyPolicy] SmolVLA ready | device={self.device}"
+            f"[MyPolicy] weights: {_WEIGHTS_DIR}"
+            f"{' (PARC_WEIGHTS_DIR)' if os.environ.get('PARC_WEIGHTS_DIR') else ''}"
+            f"\n[MyPolicy] SmolVLA ready | device={self.device}"
             f" | state_dim={self.state_dim} | chunk={self.ACTION_CHUNK_SIZE}"
             f" | exec={self.N_ACTION_EXEC} | flip180={self.FLIP_IMAGES_180}"
             f"\n[MyPolicy]   main={self.key_main} wrist={self.key_wrist}"

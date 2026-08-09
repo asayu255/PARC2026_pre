@@ -40,6 +40,18 @@ SEED="${PARC_SWEEP_SEED:-42}"
 PORT="${PARC_PORT:-8002}"
 HEALTH_TIMEOUT="${PARC_SWEEP_HEALTH_TIMEOUT:-180}"
 
+# 出力先の接頭辞。別のラウンドを回すときに前のラウンドを潰さないためのもの
+# （条件ディレクトリは毎回 rm -rf される）。results/<接頭辞>_<ラベル>/ になる。
+PREFIX="${PARC_SWEEP_PREFIX:-ens}"
+
+# PARC_SWEEP_TASK=all で公開 4 タスク全部（--tasks を付けない）。
+# 単一タスクは軸を切るため、4 タスクは回帰ガードのために使う（§26）。
+TASK_ARGS=(--tasks "$TASK")
+if [ "$TASK" = "all" ]; then
+    TASK_ARGS=()
+    TASK="公開 4 タスク全部"
+fi
+
 # 既定の 4 条件。
 #   base    現行の既定（n_exec=5）。同じ日・同じ機械での対照を取り直す
 #   h16     ACT そのまま（毎ステップ推論・16 本・m=+0.01）
@@ -50,7 +62,13 @@ CONDS="${PARC_SWEEP_CONDS:-base: h16:PARC_ENSEMBLE=1 h8:PARC_ENSEMBLE=1,PARC_ENS
 
 # 条件ごとに必ず消す。前の条件の値が残っていると、意図と違う設定で
 # 評価してしまい、数字が間違っていることに気づけない。
-KNOBS=(PARC_ENSEMBLE PARC_ENS_H PARC_ENS_QUERY PARC_ENS_M PARC_ENS_GRIPPER PARC_N_EXEC)
+#
+# PARC_WEIGHTS_DIR も消す。これがシェルに残っていると、base を含む全条件が
+# LoRA のマージ済み重みで走る。追加学習の評価（§26.2）のあと同じシェルから
+# スイープを始めると起きうる事故で、しかも静かに起きる。重みを振りたい場合は
+# 条件側に `label:PARC_WEIGHTS_DIR=...` と書けばよい。
+KNOBS=(PARC_ENSEMBLE PARC_ENS_H PARC_ENS_QUERY PARC_ENS_M PARC_ENS_GRIPPER
+       PARC_N_EXEC PARC_WEIGHTS_DIR)
 CLEAR=(); for k in "${KNOBS[@]}"; do CLEAR+=(-u "$k"); done
 
 LABELS=""
@@ -66,7 +84,7 @@ for spec in $CONDS; do
 done
 echo "   エピソード  : $EPISODES / 条件   最大ステップ: $MAX_STEPS   seed: $SEED"
 echo "   ポート      : $PORT"
-echo "   出力        : results/ens_<ラベル>/  ログ: logs/"
+echo "   出力        : results/${PREFIX}_<ラベル>/  ログ: logs/"
 echo "======================================================"
 
 if [ "${1:-}" = "--dry-run" ]; then
@@ -176,8 +194,8 @@ for spec in $CONDS; do
     label="${spec%%:*}"
     assign="${spec#*:}"
     [ "$assign" = "$spec" ] && assign=""          # ':' が無い書き方も許す
-    OUT="results/ens_${label}"
-    SRVLOG="logs/server_ens_${label}.log"
+    OUT="results/${PREFIX}_${label}"
+    SRVLOG="logs/server_${PREFIX}_${label}.log"
     echo
     echo "=== $label : ${assign:-（つまみ無し）} ==============================="
     rm -rf "$OUT"; mkdir -p "$OUT"
@@ -237,11 +255,12 @@ for spec in $CONDS; do
     esac
 
     python -m pipeline --server-url "http://127.0.0.1:$PORT" --track track1 \
-        --tasks "$TASK" --n-episodes "$EPISODES" --max-steps "$MAX_STEPS" \
+        ${TASK_ARGS[@]+"${TASK_ARGS[@]}"} \
+        --n-episodes "$EPISODES" --max-steps "$MAX_STEPS" \
         --timeout 10 --seed "$SEED" --output-dir "$OUT" \
-        > "logs/eval_ens_${label}.log" 2>&1
+        > "logs/eval_${PREFIX}_${label}.log" 2>&1
     rc=$?
-    [ "$rc" = "0" ] || echo "[sweep] 評価が rc=$rc で終了。logs/eval_ens_${label}.log を確認"
+    [ "$rc" = "0" ] || echo "[sweep] 評価が rc=$rc で終了。logs/eval_${PREFIX}_${label}.log を確認"
 
     # レイテンシは必ず見る。1 リクエストでも 10 秒を超えるとトラックが 0 点になる。
     grep 'レイテンシ' "$SRVLOG" | tail -3 | sed 's/^/    /'
@@ -254,62 +273,8 @@ echo
 echo "======================================================"
 echo " 結果"
 echo "======================================================"
-python3 - "$LABELS" "$EPISODES" <<'PY'
-import glob, json, math, sys
+python3 tools/show_ensemble_results.py --prefix "$PREFIX" --episodes "$EPISODES"
 
-labels = sys.argv[1].split()
-episodes = int(sys.argv[2])
-
-print(f"{'条件':>8} {'success':>8} {'collision':>10} {'cartesian':>10} "
-      f"{'jerk(rms)':>10} {'sparc':>8}")
-rows = {}
-for label in labels:
-    files = sorted(glob.glob(f"results/ens_{label}/*.json"))
-    if not files:
-        print(f"{label:>8} {'--- 結果なし ---':>8}")
-        continue
-    d = json.load(open(files[-1]))
-    tracks = d.get("tracks") or []
-    tasks = (tracks[0].get("tasks") if tracks else []) or []
-    if not tasks:
-        print(f"{label:>8}   評価が失敗（tasks が空）")
-        continue
-    t = tasks[0]; m = t.get("metrics", {})
-    rows[label] = (t["success_rate"], m)
-
-    def g(k):
-        v = m.get(k)
-        return f"{v:.3f}" if isinstance(v, (int, float)) else "-"
-    print(f"{label:>8} {t['success_rate']:>8.2f} {g('collision_rate'):>10} "
-          f"{g('cartesian_path_length'):>10} {g('rms_cartesian_jerk'):>10} {g('sparc'):>8}")
-
-if "base" in rows and len(rows) > 1:
-    base_sr, base_m = rows["base"]
-    print()
-    print("base との差:")
-    for label, (sr, m) in rows.items():
-        if label == "base":
-            continue
-        parts = [f"success {sr - base_sr:+.3f}"]
-        for key, name in (("collision_rate", "collision"), ("rms_cartesian_jerk", "jerk")):
-            a, b = m.get(key), base_m.get(key)
-            if isinstance(a, (int, float)) and isinstance(b, (int, float)):
-                parts.append(f"{name} {a - b:+.3f}")
-        print(f"  {label:>8}  " + "  ".join(parts))
-
-se = math.sqrt(0.2 * 0.8 / episodes) if episodes else float("nan")
-print()
-print("読み方:")
-print(f"  success の標準誤差は p=0.8・{episodes} エピソードで約 {se*100:.1f} pt。")
-print("  この幅に収まる差は読まないこと。単独の success で採否を決めない。")
-print()
-print("  jerk が下がる      -> 狙いどおり。チャンク境界の不連続が減っている")
-print("  collision が下がる -> 採点スコアに直接効く（採点で到達した 2 本は")
-print("                        どちらも 1mm ルールで落ちている。§22.3.1）")
-print("  jerk だけ下がって collision が動かない -> 滑らかにはなったが")
-print("                        接触の原因は別。ensembling では届かない")
-print("  どれも動かない     -> この軸も閉じる。§27.3 の追加学習へ戻る")
-print()
-print("採用するなら submission/policy_server.py の TEMPORAL_ENSEMBLE の既定と、")
-print("ENVIRONMENT_SETUP.md §29 の表を書き換えること。")
-PY
+echo
+echo "採用するなら submission/policy_server.py の TEMPORAL_ENSEMBLE / ENSEMBLE_* の"
+echo "既定と、ENVIRONMENT_SETUP.md §29 の表を書き換えること。"
