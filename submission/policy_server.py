@@ -73,7 +73,11 @@ class BasePolicy(ABC):
 
 
 _HERE = Path(__file__).resolve().parent
-_WEIGHTS_DIR = _HERE / "model_weights"
+
+# 既定は同梱の model_weights。追加学習したモデルを評価するときは
+# PARC_WEIGHTS_DIR でマージ済みディレクトリを指せば、ファイルを
+# 入れ替えずに A/B が取れる。提出 zip では未設定なので影響しない。
+_WEIGHTS_DIR = Path(os.environ.get("PARC_WEIGHTS_DIR") or (_HERE / "model_weights"))
 _BACKBONE_DIR = _HERE / "smolvlm_backbone"
 
 # lerobot は pip では入れられないので同梱する。
