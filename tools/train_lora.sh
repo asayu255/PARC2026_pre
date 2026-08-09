@@ -200,6 +200,24 @@ fi
 EMPTY_CAMERAS="${PARC_LORA_EMPTY_CAMERAS:-keep}"
 RENAME_MAP="${PARC_LORA_RENAME_MAP-{\"observation.images.front\":\"observation.images.camera1\",\"observation.images.wrist\":\"observation.images.camera2\"}}"
 
+# --- 全パラメータ学習の対象 ---------------------------------------------------
+# lerobot の PEFT 設定にある full_training_modules は、LoRA ではなく
+# 全パラメータを学習する層を指定する（peft の modules_to_save）。
+# lerobot/configs/default.py の説明にこうある:
+#
+#   Useful for layers that are not part of a pre-trained model (e.g., action
+#   state projections). ... If you're fine-tuning an already trained policy
+#   you might want to set this to `[]`.
+#
+# 我々はまさに学習済みポリシーの追加学習である。既定のままだと action /
+# state projection がベースの重みを捨てて学習し直され、序盤で壊れる。
+# 実際 step 5000 で 45.0%、step 15000 で 50.0% と、学習量を減らしても
+# 戻らなかった（=序盤で既に壊れている）挙動と整合する。
+FULL_MODULES=()
+if [ "${PARC_LORA_FULL_MODULES:-[]}" != "default" ]; then
+    FULL_MODULES=(--peft.full_training_modules="${PARC_LORA_FULL_MODULES:-[]}")
+fi
+
 FEATURES=()
 if [ "$EMPTY_CAMERAS" != "keep" ]; then
     FEATURES=(
@@ -243,6 +261,7 @@ CMD=(
     --wandb.enable=false
     --peft.method_type=LORA
     --peft.r="$R"
+    "${FULL_MODULES[@]}"
 )
 
 echo "======================================================"
@@ -258,6 +277,7 @@ else
     echo "   画像スロット: front + wrist + 空 $EMPTY_CAMERAS 枚 = $((2 + EMPTY_CAMERAS)) 枚（ベースは 5 枚）"
 fi
 echo "   rename_map  : ${RENAME_MAP:-なし}"
+echo "   全学習層    : ${PARC_LORA_FULL_MODULES:-[]}（default にすると lerobot 既定）"
 echo "   出力        : $OUT_DIR"
 echo "   GPU         : ${CUDA_VISIBLE_DEVICES:-0}"
 echo "======================================================"
