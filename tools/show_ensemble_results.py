@@ -61,6 +61,22 @@ def load(directory):
     return out, len(tasks)
 
 
+def per_task(directory):
+    """タスクごとの (名前, success_rate, collision_rate) を返す。"""
+    files = sorted(glob.glob(os.path.join(directory, "*.json")))
+    if not files:
+        return []
+    with open(files[-1]) as fh:
+        data = json.load(fh)
+    tracks = data.get("tracks") or []
+    out = []
+    for task in (tracks[0].get("tasks") if tracks else []) or []:
+        out.append((task.get("task_name", "?"),
+                    task.get("success_rate"),
+                    task.get("metrics", {}).get("collision_rate")))
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--prefix", default="ens",
@@ -69,6 +85,8 @@ def main():
                     help="差分の基準にする条件名（既定: base）")
     ap.add_argument("--episodes", type=int, default=50,
                     help="1 条件あたりのエピソード数。標準誤差の表示に使う")
+    ap.add_argument("--per-task", action="store_true",
+                    help="タスクごとの success / collision も出す")
     args = ap.parse_args()
 
     dirs = sorted(glob.glob(f"results/{args.prefix}_*/"))
@@ -93,6 +111,24 @@ def main():
             for _, name in METRICS
         )
         print(f"{label:>8}{cells}")
+
+    if args.per_task:
+        print()
+        print("タスク別:")
+        per = {}
+        for d in dirs:
+            label = os.path.basename(d.rstrip("/"))[len(args.prefix) + 1:]
+            for name, sr, col in per_task(d):
+                per.setdefault(name, {})[label] = (sr, col)
+        labels = [lbl for lbl, v in rows if v is not None]
+        print(f"  {'タスク':<46}" + "".join(f"{lbl:>18}" for lbl in labels))
+        for name, by_label in per.items():
+            cells = ""
+            for lbl in labels:
+                sr, col = by_label.get(lbl, (None, None))
+                cells += (f"{sr:>10.2f}/{col:<7.2f}" if sr is not None else f"{'-':>18}")
+            print(f"  {name[:46]:<46}" + cells)
+        print("  （success / collision）")
 
     base = dict(rows).get(args.baseline)
     if base:
