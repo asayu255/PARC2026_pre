@@ -166,15 +166,34 @@ if [ "${PARC_LORA_AUG:-0}" != "0" ]; then
     AUG=(--dataset.image_transforms.enable=true)
 fi
 
+# --- 特徴量レイアウト ---------------------------------------------------------
+# ノートブックは input_features / output_features を null にし
+# empty_cameras=0 を渡す。これを持ち込むと、ベースの
+#   camera1, camera2, camera3, empty_camera_0, empty_camera_1  (画像 5 枚)
+# がデータセットから再導出されて
+#   front, wrist                                               (画像 2 枚)
+# になる。ベースの重みは 5 枚で事前学習されており、vision encoder 凍結 +
+# train_expert_only では rank 8 の LoRA がこのズレを吸収できない。
+# 実際これで公開 4 タスクが 82.5% -> 50.0% に落ちた。
+#
+# 既定ではフラグを渡さず、ベース config のレイアウトをそのまま使う。
+# ノートブックと同じ挙動に戻すには PARC_LORA_REDERIVE_FEATURES=1。
+FEATURES=()
+if [ "${PARC_LORA_REDERIVE_FEATURES:-0}" != "0" ]; then
+    FEATURES=(
+        --policy.input_features=null
+        --policy.output_features=null
+        --policy.empty_cameras=0
+    )
+fi
+
 CMD=(
     "$TRAIN_BIN"
     --policy.path="$BASE_MODEL"
     --policy.vlm_model_name="$BACKBONE"
     --policy.push_to_hub=false
     --policy.repo_id=null
-    --policy.input_features=null
-    --policy.output_features=null
-    --policy.empty_cameras=0
+    "${FEATURES[@]}"
     --policy.freeze_vision_encoder=true
     --policy.train_expert_only=true
     --policy.optimizer_lr="$LR"
@@ -208,6 +227,11 @@ echo "   エピソード  : $N_EPISODES 本（$EP_PER_TASK / タスク）"
 echo "   r           : $R   （lora_alpha は peft 既定。実効強度 = alpha/r）"
 echo "   steps       : $STEPS   batch: $BATCH   lr: $LR -> $FINAL_LR"
 echo "   拡張        : ${PARC_LORA_AUG:-0}   動画: $VIDEO_BACKEND"
+if [ "${PARC_LORA_REDERIVE_FEATURES:-0}" != "0" ]; then
+    echo "   特徴量      : データセットから再導出（ベースの 5 画像スロットを捨てる）"
+else
+    echo "   特徴量      : ベース config のまま"
+fi
 echo "   出力        : $OUT_DIR"
 echo "   GPU         : ${CUDA_VISIBLE_DEVICES:-0}"
 echo "======================================================"
