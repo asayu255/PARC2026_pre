@@ -90,6 +90,29 @@ for d in "$BASE_MODEL" "$BACKBONE"; do
     [ -d "$d" ] || { echo "ERROR: $d が無い。" >&2; exit 1; }
 done
 
+# --- データセットの並行ダウンロードを防ぐ ------------------------------------
+# LeRobotDataset は HF hub のキャッシュとは別に HF_LEROBOT_HOME 配下へ
+# 落とし直す。そのため huggingface_hub で先に snapshot_download してあっても
+# 初回は 15GiB のダウンロードが走る。この状態で 2 本目を起動すると同じ宛先へ
+# 並行して書き込むことになる。実際に A/B を並列で始めて踏んだ。
+#
+# プロセスの有無では判定できない（このスクリプトは exec するので
+# pgrep -f train_lora.sh に引っかからなくなる）。ダウンロード中の証拠である
+# .incomplete ファイルを見る。
+LEROBOT_HOME="${HF_LEROBOT_HOME:-$HOME/.cache/huggingface/lerobot}"
+DATASET_DIR="$LEROBOT_HOME/$DATASET_REPO"
+if [ "$DRY" = "0" ] && [ -d "$DATASET_DIR" ]; then
+    if find "$DATASET_DIR" -name '*.incomplete' -newermt '-10 minutes' 2>/dev/null | grep -q .; then
+        echo "ERROR: $DATASET_DIR に進行中のダウンロードがある。" >&2
+        echo "       同じ宛先への並行ダウンロードになるため中止する。" >&2
+        echo "       先行の学習がデータ取得を終えてから起動し直すこと:" >&2
+        echo "           grep -E 'step|loss' logs/train_lora_*.log | tail" >&2
+        echo "       どうしても同時に始めたい場合は宛先を分ける:" >&2
+        echo "           HF_LEROBOT_HOME=\$HOME/.cache/huggingface/lerobot2 bash tools/train_lora.sh" >&2
+        exit 1
+    fi
+fi
+
 # --- 学習に使うエピソードを選ぶ ---------------------------------------------
 mkdir -p "$ROOT/runs" "$ROOT/logs"
 if [ ! -s "$EPISODES_JSON" ]; then
