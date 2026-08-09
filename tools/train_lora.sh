@@ -187,7 +187,19 @@ fi
 # そこで再導出はさせた上で、空スロットの数でスロット総数をベースに合わせる。
 # front + wrist + 空 N 枚 = 2 + N。ベースの 5 に合わせるなら N=3。
 # keep を指定すると何も渡さない（ベース config のまま。上記の理由で失敗する）。
-EMPTY_CAMERAS="${PARC_LORA_EMPTY_CAMERAS:-3}"
+# 正しい解き方は lerobot 自身がエラーで教えてくれる: --rename_map で
+# データセットのキーをベースの名前へ割り当てる。推論時に preprocessor が
+# やっている front->camera1 / wrist->camera2 と同じことを学習時にもする。
+#
+#   ValueError: Feature mismatch ...
+#   - Missing features: [camera1, camera2, camera3, empty_camera_0, empty_camera_1]
+#   - Extra features:   [front, wrist]
+#   ... use the `--rename_map` argument
+#
+# 既定はこの割り当て + ベース config 維持（EMPTY_CAMERAS=keep）。
+EMPTY_CAMERAS="${PARC_LORA_EMPTY_CAMERAS:-keep}"
+RENAME_MAP="${PARC_LORA_RENAME_MAP-{\"observation.images.front\":\"observation.images.camera1\",\"observation.images.wrist\":\"observation.images.camera2\"}}"
+
 FEATURES=()
 if [ "$EMPTY_CAMERAS" != "keep" ]; then
     FEATURES=(
@@ -195,6 +207,9 @@ if [ "$EMPTY_CAMERAS" != "keep" ]; then
         --policy.output_features=null
         --policy.empty_cameras="$EMPTY_CAMERAS"
     )
+fi
+if [ -n "$RENAME_MAP" ]; then
+    FEATURES+=(--rename_map="$RENAME_MAP")
 fi
 
 CMD=(
@@ -242,6 +257,7 @@ if [ "$EMPTY_CAMERAS" = "keep" ]; then
 else
     echo "   画像スロット: front + wrist + 空 $EMPTY_CAMERAS 枚 = $((2 + EMPTY_CAMERAS)) 枚（ベースは 5 枚）"
 fi
+echo "   rename_map  : ${RENAME_MAP:-なし}"
 echo "   出力        : $OUT_DIR"
 echo "   GPU         : ${CUDA_VISIBLE_DEVICES:-0}"
 echo "======================================================"
