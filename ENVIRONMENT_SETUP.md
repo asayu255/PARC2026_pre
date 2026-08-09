@@ -1,7 +1,7 @@
 # PARC 2026 現在の環境構築メモ
 
 最終更新: 2026-08-09  
-対象ホスト: `wakaba`  
+対象ホスト: `wakaba` / `yamabuki`（ホーム共有の別ノード。§2）  
 リポジトリ: `/opt/home/ohara/PARC2026_pre`  
 対象ブランチ: `claude/repository-code-progress-check-cconqv`
 
@@ -178,6 +178,26 @@ Miniforge        /opt/home/ohara/miniforge3
 ```
 
 管理者権限を前提とせず、Python、ImageMagick、OSMesa をユーザー領域へ配置している。
+
+### 2.1 ノードは複数ある。測定したノードを必ず記録すること
+
+`/opt/home/ohara` は共有されていて、`wakaba` と `yamabuki` から同じ
+リポジトリ・同じ venv・同じ重みが見える。どちらも RTX A6000 ×3 で、
+`hostname` を見ないと区別が付かない。
+
+これが問題になるのは、成績を比べるときである。§29.7 で同一設定の
+再測定が 10 pt ドリフトしたが、片方は yamabuki、記録元の §25.1 は
+おそらく wakaba で、**測定ばらつきとノード差を分離できなかった**。
+
+以後、数字を記録するときは日付とホスト名を併記する。A/B は 1 ラウンドを
+同一ノードで回し、対照（`base`）を必ずラウンド内に含めること。
+
+```bash
+hostname
+nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader  # 相乗り確認
+```
+
+temporal ensembling の測定（§29）は **yamabuki** に揃えている。
 
 ---
 
@@ -1842,7 +1862,12 @@ python -m pytest tests/test_temporal_ensemble.py -q
 success と collision は別々の変化ではなく、**約 5 エピソードが「成功」から
 「衝突失格」へ移った 1 つの変化**である。GPU は A6000 で §2 の記録と同じ、
 他ジョブの相乗りも無く、`PARC_WEIGHTS_DIR` も未設定だった（サーバーの
-`/proc/<pid>/environ` で確認）。したがってこれは測定そのもののばらつきである。
+`/proc/<pid>/environ` で確認）。
+
+ただし**ノードが違う**。今回は yamabuki、§25.1 はおそらく wakaba である
+（§2.1）。同型の GPU なので大きな差が出る理由は無いが、測定ばらつきと
+ノード差を分離はできていない。どちらであっても対処は同じで、
+**対照をラウンド内に置き、記録値と比べないこと**に尽きる。
 
 ここから 2 つ従う。
 
