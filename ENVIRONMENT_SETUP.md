@@ -1522,3 +1522,54 @@ PY
 
 3 は全データのダウンロードは発生しない（メタデータのみ）。
 学習本体はデータセットの実体（動画）を落とすので、ディスク残量に注意する。
+
+---
+
+## 26. LoRA の判定ライン（ベース基準値）
+
+追加学習の採否はこの数字に対して決める。EGL・公開 4 タスク × 10 エピソード・
+300 step・seed 42・`N_ACTION_EXEC=5`（現行の既定）。所要 563 秒。
+
+| タスク | ベース |
+|---|---|
+| pick_up_the_black_bowl_in_the_top_drawer_..._table_2 | 90.0% |
+| pick_up_the_tomato_sauce_..._table_27 | 70.0% |
+| pick_up_the_milk_..._light_15 | 90.0% |
+| put_the_bowl_on_the_stove_light_11 | 80.0% |
+| **overall** | **82.5%** |
+
+### 26.1 この 82.5% を n_exec の比較に使わないこと
+
+`n_exec=10` / OSMesa / 300 step の §23 も overall 82.5% だった。
+タスクごとには 80/100/70/80 と 90/70/90/80 で ±30 pt 動いているのに
+平均が一致している。10 エピソード/タスクでは `n_exec` の差は解像できない、
+というだけである（§23.3 と同じ話）。
+
+`n_exec=5` の採用根拠は 50 エピソードの stove スイープ（§25.1）であって、
+この表ではない。本数が 5 倍あり、jerk が 2 回再現している方を採る。
+
+### 26.2 評価の回し方
+
+`PARC_WEIGHTS_DIR` で重みを差し替える。ファイルの移動は不要。
+
+| 条件 | PARC_WEIGHTS_DIR | 出力先 |
+|---|---|---|
+| ベース | 未設定 | `results/base_nexec5` |
+| 拡張なし | `runs/merged_lora_all40_r8` | `results/lora_all40` |
+| 拡張あり | `runs/merged_lora_all40aug_r8` | `results/lora_all40aug` |
+
+```bash
+# ターミナル A（条件ごとに起動し直す）
+PARC_WEIGHTS_DIR=$PWD/runs/merged_lora_all40_r8 bash tools/run_policy_server.sh
+
+# ターミナル B
+source activate_parc.sh
+python -m pipeline --server-url http://127.0.0.1:8002 --track track1 \
+  --n-episodes 10 --max-steps 300 --timeout 10 --seed 42 \
+  --output-dir results/lora_all40 2>&1 | tee logs/eval_lora_all40.log
+```
+
+採用条件は「82.5% を上回り、collision が悪化していないこと」。
+ただし公開 4 タスクは回帰ガードにすぎず、採点セットへの汎化は測れない
+（§22.2）。10 エピソード/タスクの分解能も上記のとおり低いので、
+差が小さい場合は本数を増やしてから判断すること。
