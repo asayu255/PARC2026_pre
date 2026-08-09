@@ -108,17 +108,23 @@ def main() -> None:
     print(f"out        : {out}\n")
 
     import torch
-    from lerobot.configs import PreTrainedConfig
+
+    # lerobot 0.4.4 の lerobot.configs は名前空間パッケージで PreTrainedConfig を
+    # 再エクスポートしない（`from lerobot.configs import ...` は unknown location で
+    # 失敗する）。policy_server.py:262 と同じ場所から取る。
+    from lerobot.configs.policies import PreTrainedConfig
     from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
     from peft import PeftModel
 
-    config = PreTrainedConfig.from_pretrained(str(checkpoint))
+    config = PreTrainedConfig.from_pretrained(str(checkpoint), local_files_only=True)
     config.device = "cpu"
     config.pretrained_path = str(base)
     config.use_peft = False
 
     print("ベースを読み込み中...")
-    policy = SmolVLAPolicy.from_pretrained(str(base), config=config, strict=False)
+    policy = SmolVLAPolicy.from_pretrained(
+        str(base), config=config, strict=False, local_files_only=True
+    )
 
     print("adapter を適用してマージ中...")
     peft_policy = PeftModel.from_pretrained(
