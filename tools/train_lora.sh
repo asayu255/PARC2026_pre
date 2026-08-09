@@ -38,6 +38,16 @@ TAG="${PARC_LORA_TAG:-all40}"
 WORKERS="${PARC_LORA_WORKERS:-8}"
 SEED="${PARC_LORA_SEED:-42}"
 
+# 動画デコードのバックエンド。
+# ノートブックは torchcodec を使うが、parc-policy には FFmpeg の共有
+# ライブラリが無く libtorchcodec_core*.so のロードに失敗する
+# （OSError: Could not load this library: .../libtorchcodec_core4.so）。
+# PyAV は wheel に FFmpeg を同梱しているので追加インストール無しで動く。
+# torchcodec の方が速いので、FFmpeg を入れたなら torchcodec に戻してよい:
+#     conda install -n parc-policy -c conda-forge ffmpeg
+#     PARC_LORA_VIDEO_BACKEND=torchcodec bash tools/train_lora.sh
+VIDEO_BACKEND="${PARC_LORA_VIDEO_BACKEND:-pyav}"
+
 DATASET_REPO="lerobot/libero_plus"
 DATASET_REVISION="f3f49f426d75030177b18778374005bc12ccd588"
 
@@ -81,6 +91,30 @@ CLEAN=(env -u VIRTUAL_ENV -u PYTHONHOME -u PYTHONPATH -u LD_LIBRARY_PATH)
 if ! "${CLEAN[@]}" "$PY" -c 'import peft' 2>/dev/null; then
     echo "ERROR: $PY に peft が入っていない。" >&2
     echo "       pip install -c <freeze> 'peft>=0.18.0,<1.0.0' すること。" >&2
+    exit 1
+fi
+
+# 動画バックエンドは学習開始の 1 秒後に初めて使われるため、壊れていても
+# 15,000 step のプログレスバーが出てから落ちる。先に確かめて早く失敗させる。
+case "$VIDEO_BACKEND" in
+    pyav)
+        BACKEND_CHECK='import av; av.open'
+        BACKEND_FIX="pip install av" ;;
+    torchcodec)
+        BACKEND_CHECK='from torchcodec.decoders import VideoDecoder' ;;
+    *)
+        BACKEND_CHECK="pass" ;;
+esac
+if ! "${CLEAN[@]}" "$PY" -c "$BACKEND_CHECK" 2>/dev/null; then
+    echo "ERROR: 動画バックエンド '$VIDEO_BACKEND' が使えない。" >&2
+    "${CLEAN[@]}" "$PY" -c "$BACKEND_CHECK" 2>&1 | tail -5 | sed 's/^/    /' >&2
+    if [ "$VIDEO_BACKEND" = "torchcodec" ]; then
+        echo "       torchcodec は FFmpeg の共有ライブラリを要求する。" >&2
+        echo "       PARC_LORA_VIDEO_BACKEND=pyav にするか、FFmpeg を入れること:" >&2
+        echo "           conda install -n parc-policy -c conda-forge ffmpeg" >&2
+    else
+        echo "       ${BACKEND_FIX:-}" >&2
+    fi
     exit 1
 fi
 
@@ -151,7 +185,7 @@ CMD=(
     --dataset.revision="$DATASET_REVISION"
     --dataset.episodes="$EPISODES"
     --dataset.use_imagenet_stats=false
-    --dataset.video_backend=torchcodec
+    --dataset.video_backend="$VIDEO_BACKEND"
     "${AUG[@]}"
     --output_dir="$OUT_DIR"
     --job_name="lora_${TAG}_r${R}"
@@ -173,7 +207,7 @@ echo "   ベース      : $BASE_MODEL"
 echo "   エピソード  : $N_EPISODES 本（$EP_PER_TASK / タスク）"
 echo "   r           : $R   （lora_alpha は peft 既定。実効強度 = alpha/r）"
 echo "   steps       : $STEPS   batch: $BATCH   lr: $LR -> $FINAL_LR"
-echo "   拡張        : ${PARC_LORA_AUG:-0}"
+echo "   拡張        : ${PARC_LORA_AUG:-0}   動画: $VIDEO_BACKEND"
 echo "   出力        : $OUT_DIR"
 echo "   GPU         : ${CUDA_VISIBLE_DEVICES:-0}"
 echo "======================================================"
