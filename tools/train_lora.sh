@@ -167,23 +167,33 @@ if [ "${PARC_LORA_AUG:-0}" != "0" ]; then
 fi
 
 # --- 特徴量レイアウト ---------------------------------------------------------
-# ノートブックは input_features / output_features を null にし
-# empty_cameras=0 を渡す。これを持ち込むと、ベースの
-#   camera1, camera2, camera3, empty_camera_0, empty_camera_1  (画像 5 枚)
-# がデータセットから再導出されて
-#   front, wrist                                               (画像 2 枚)
-# になる。ベースの重みは 5 枚で事前学習されており、vision encoder 凍結 +
-# train_expert_only では rank 8 の LoRA がこのズレを吸収できない。
-# 実際これで公開 4 タスクが 82.5% -> 50.0% に落ちた。
+# ベース config の画像スロットは 5 枚である。
+#   camera1, camera2, camera3, empty_camera_0, empty_camera_1
+# 推論時に policy_server.py が渡すのは front と wrist の 2 枚で、
+# preprocessor の rename_map が front->camera1, wrist->camera2 に割り当てる。
+# 残る camera3 / empty_camera_0 / empty_camera_1 は空のまま。
+# つまり実質「実画像 2 枚 + 空 3 枚 = 5 スロット」で事前学習されている。
 #
-# 既定ではフラグを渡さず、ベース config のレイアウトをそのまま使う。
-# ノートブックと同じ挙動に戻すには PARC_LORA_REDERIVE_FEATURES=1。
+# ノートブックの input_features=null / output_features=null / empty_cameras=0 を
+# そのまま使うと、データセットから再導出されて front, wrist の 2 枚だけになる。
+# ベースの重みは 5 枚前提であり、vision encoder 凍結 + train_expert_only では
+# rank 8 の LoRA でこのズレを吸収できない。実際に公開 4 タスクが
+# 82.5% -> 50.0% に落ちた。
+#
+# かといってフラグを一切渡さないと、データセットのキー（front / wrist）が
+# ベースの input_features（camera1..）と一致せず lerobot が弾く。
+#   ValueError: Feature mismatch between dataset/environment and policy config.
+#
+# そこで再導出はさせた上で、空スロットの数でスロット総数をベースに合わせる。
+# front + wrist + 空 N 枚 = 2 + N。ベースの 5 に合わせるなら N=3。
+# keep を指定すると何も渡さない（ベース config のまま。上記の理由で失敗する）。
+EMPTY_CAMERAS="${PARC_LORA_EMPTY_CAMERAS:-3}"
 FEATURES=()
-if [ "${PARC_LORA_REDERIVE_FEATURES:-0}" != "0" ]; then
+if [ "$EMPTY_CAMERAS" != "keep" ]; then
     FEATURES=(
         --policy.input_features=null
         --policy.output_features=null
-        --policy.empty_cameras=0
+        --policy.empty_cameras="$EMPTY_CAMERAS"
     )
 fi
 
@@ -227,10 +237,10 @@ echo "   エピソード  : $N_EPISODES 本（$EP_PER_TASK / タスク）"
 echo "   r           : $R   （lora_alpha は peft 既定。実効強度 = alpha/r）"
 echo "   steps       : $STEPS   batch: $BATCH   lr: $LR -> $FINAL_LR"
 echo "   拡張        : ${PARC_LORA_AUG:-0}   動画: $VIDEO_BACKEND"
-if [ "${PARC_LORA_REDERIVE_FEATURES:-0}" != "0" ]; then
-    echo "   特徴量      : データセットから再導出（ベースの 5 画像スロットを捨てる）"
+if [ "$EMPTY_CAMERAS" = "keep" ]; then
+    echo "   画像スロット: ベース config のまま（5 枚）"
 else
-    echo "   特徴量      : ベース config のまま"
+    echo "   画像スロット: front + wrist + 空 $EMPTY_CAMERAS 枚 = $((2 + EMPTY_CAMERAS)) 枚（ベースは 5 枚）"
 fi
 echo "   出力        : $OUT_DIR"
 echo "   GPU         : ${CUDA_VISIBLE_DEVICES:-0}"
