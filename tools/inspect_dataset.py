@@ -213,8 +213,9 @@ def select(df, by_task: dict[str, list[int]], per_task: int, out_path: str | Non
         print(f"  batch {batch:3d}: 1 epoch = {frames // batch} steps")
 
     if out_path:
+        # lerobot-train の --dataset.episodes に丸ごと渡すので空白を入れない。
         with open(out_path, "w") as fh:
-            json.dump(selected, fh)
+            json.dump(selected, fh, separators=(",", ":"))
         print(f"  書き出し: {out_path}")
     else:
         print("  --out を付けると JSON に書き出す（lerobot-train の --dataset.episodes 用）")
