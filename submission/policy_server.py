@@ -116,6 +116,22 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
     return v
 
 
+def _env_float(name: str, default: float) -> float:
+    """環境変数を float で読む。不正値は既定へ落として警告する。
+
+    _env_int と違い下限は設けない。temporal ensembling の減衰係数は
+    負の値にも意味がある（新しい予測を重く見る向きになる）。
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        print(f"[MyPolicy] {name}={raw!r} を float として読めない。既定 {default} を使う。")
+        return default
+
+
 _DEBUG_MAX = _env_int("PARC_DEBUG_MAX", 3)
 
 
@@ -206,6 +222,58 @@ class MyPolicy(BasePolicy):
     #: A/B 用に PARC_N_EXEC で上書きできる。既定（未設定）は 5。
     N_ACTION_EXEC = _env_int("PARC_N_EXEC", 5)
 
+    # --- temporal ensembling (ACT / Zhao et al. 2023) -------------------------
+    #: n_exec を下げても改善しなかった理由は「open-loop 区間が長いこと」では
+    #: なく「チャンク境界の不連続」である（n_exec=2 は 3 指標すべてで最悪）。
+    #: flow-matching は推論のたびにノイズを引き直すので、境界で前後のチャンクが
+    #: 食い違う。区間を短くすると境界の数が増えるだけで、悪化する。
+    #:
+    #: temporal ensembling は境界で切り替える代わりに混ぜる。毎ステップ推論し、
+    #: 「そのステップ向けに過去 H 回の推論が出した予測」を指数重みで平均する。
+    #: 再サンプリング由来のばらつきが平均で落ちるので、モデルには一切触れずに
+    #: jerk（＝まさにこの量を測っている指標）を下げられる。
+    #:
+    #: 有効にすると N_ACTION_EXEC は使われない（推論頻度は ENSEMBLE_QUERY_EVERY）。
+    #:
+    #: **既定は無効。** 3 回目の採点 0.077 の構成をそのまま残すためで、
+    #: 下の A/B（tools/sweep_ensemble.sh）で collision / jerk の改善を確認して
+    #: から既定を切り替えること。N_ACTION_EXEC のときと同じ手順である。
+    TEMPORAL_ENSEMBLE = os.environ.get("PARC_ENSEMBLE", "0") != "0"
+
+    #: 各チャンクから何ステップ先までを ensembling に積むか。
+    #: 同時に重なる予測の本数は概ね H / ENSEMBLE_QUERY_EVERY になる。
+    #:
+    #: ACT はチャンク全長（100）を積むが、あちらの action は関節の絶対位置で、
+    #: 古い予測でも「同じ目標姿勢」の推定値なので陳腐化しにくい。PARC の action
+    #: は差分（dx, dy, dz, ...）なので、H 歩前の観測に基づく予測は「今どこに
+    #: いるか」の想定がずれたぶん系統的に外れる。既定を chunk 全長（50）ではなく
+    #: 16（20fps で 0.8 秒）に抑えているのはこのため。A/B の主軸のひとつ。
+    ENSEMBLE_HORIZON = _env_int("PARC_ENS_H", 16)
+
+    #: 何ステップおきに推論するか。1 が ACT 本来の設定（毎ステップ）。
+    #: 2 にすると推論回数は半分、重なる予測の本数も半分になる。
+    #: 採点実測のレイテンシは 1 推論あたり約 0.45 秒（制限 10 秒）なので
+    #: 1 リクエストの制約には余裕があるが、合計時間は n_exec=5 の約 5 倍になる。
+    ENSEMBLE_QUERY_EVERY = _env_int("PARC_ENS_QUERY", 1)
+
+    #: 重み w_i = exp(-m * i)。i は予測の古い順の番号で、i=0 が最も古い。
+    #: ACT の実装（k=0.01）と同じ向き・同じ既定値である。
+    #:
+    #: この向きは ACT が絶対位置を出力することを前提にしている。差分 action では
+    #: 古い予測ほど陳腐化するので、**m を負にして新しい予測を重く見る**ほうが
+    #: 筋が通る可能性がある。符号を含めて A/B で決めること。
+    #:   m = +0.01 … ほぼ一様平均（ACT 既定。50 本でも最古:最新 = 1:0.61）
+    #:   m = 0     … 完全な一様平均
+    #:   m = -0.1  … 新しい予測を重く見る（16 本で最新:最古 = 1:0.22）
+    ENSEMBLE_M = _env_float("PARC_ENS_M", 0.01)
+
+    #: gripper（action[6]）も平均するか。0 にすると最新の予測をそのまま使う。
+    #:
+    #: ACT は全次元を平均するが、あちらの gripper は連続的な開度である。
+    #: LIBERO の gripper は実質 2 値（±1）なので、平均すると開閉の切り替わりが
+    #: 数ステップ鈍る。把持の遅れが効くなら 0 側が有利になりうる。
+    ENSEMBLE_GRIPPER = os.environ.get("PARC_ENS_GRIPPER", "1") != "0"
+
     #: この秒数を超えた /act を警告する。評価側の打ち切りは 10 秒で、
     #: 1 回でも超えるとトラック全体が 0 点になる（README のタイムアウト仕様）。
     #: 推論は実測 0.24 秒だが、n_exec=50 の評価で 10 秒超のストールが実際に
@@ -215,6 +283,10 @@ class MyPolicy(BasePolicy):
     def __init__(self):
         self.instruction = ""
         self._queue: deque[np.ndarray] = deque()
+        # temporal ensembling の生きている予測。要素は [消費済みステップ数, (H,7)]。
+        # 全要素の H が同じなので、古いものから順に尽きる = FIFO で捨てられる。
+        self._ens: deque[list] = deque()
+        self._step = 0
         self.torch = None
         self.device = None
         self.preprocessor = None
@@ -246,6 +318,7 @@ class MyPolicy(BasePolicy):
             print(
                 f"[MyPolicy] {_WEIGHTS_DIR} が無いため、ゼロ action の"
                 " ベースラインで動作する（成功率は 0 になる）。"
+                f"\n[MyPolicy]   ensemble={self._ensemble_desc()}"
             )
             return None
 
@@ -307,6 +380,7 @@ class MyPolicy(BasePolicy):
             f" | state_dim={self.state_dim} | chunk={self.ACTION_CHUNK_SIZE}"
             f" | exec={self.N_ACTION_EXEC} | flip180={self.FLIP_IMAGES_180}"
             f"\n[MyPolicy]   main={self.key_main} wrist={self.key_wrist}"
+            f"\n[MyPolicy]   ensemble={self._ensemble_desc()}"
         )
         return model
 
@@ -640,16 +714,69 @@ class MyPolicy(BasePolicy):
         t0 = time.perf_counter()
         if _DEBUG_DIR and not self._warming:
             self._trace_step(obs)
-        if not self._queue:
-            chunk = np.asarray(self._predict_chunk(obs), dtype=np.float32)
-            chunk = chunk.reshape(-1, 7)
-            if chunk.shape[0] == 0:
-                raise RuntimeError("_predict_chunk() が空の action を返した。")
-            self._queue.extend(chunk[: max(1, self.N_ACTION_EXEC)])
-        action = self._sanitize(self._queue.popleft())
+        if self.TEMPORAL_ENSEMBLE:
+            action = self._sanitize(self._ensembled_action(obs))
+        else:
+            if not self._queue:
+                chunk = self._fresh_chunk(obs)
+                self._queue.extend(chunk[: max(1, self.N_ACTION_EXEC)])
+            action = self._sanitize(self._queue.popleft())
         if not self._warming:
             self._record_latency(time.perf_counter() - t0)
         return action
+
+    def _fresh_chunk(self, obs: dict[str, np.ndarray]) -> np.ndarray:
+        """_predict_chunk() を呼び、shape (N, 7) float32 として検証して返す。"""
+        chunk = np.asarray(self._predict_chunk(obs), dtype=np.float32).reshape(-1, 7)
+        if chunk.shape[0] == 0:
+            raise RuntimeError("_predict_chunk() が空の action を返した。")
+        return chunk
+
+    def _ensembled_action(self, obs: dict[str, np.ndarray]) -> np.ndarray:
+        """ACT の temporal ensembling で 1 ステップぶんの action を作る。
+
+        いま実行するステップ t に対して、過去の推論が出した予測が複数ある
+        （t で推論したチャンクの先頭、t-1 で推論したチャンクの 2 番目、…）。
+        これらはすべて「ステップ t で取るべき action」の推定値なので、
+        平均すれば推論ごとのサンプリングノイズが落ちる。チャンク境界で
+        予測を切り替える代わりに混ぜる、というのがこの手法である。
+
+        重みは ACT と同じ w_i = exp(-m * i)（i=0 が最も古い予測）。
+        """
+        if self._step % self.ENSEMBLE_QUERY_EVERY == 0 or not self._ens:
+            chunk = self._fresh_chunk(obs)
+            self._ens.append([0, chunk[: max(1, self.ENSEMBLE_HORIZON)]])
+        self._step += 1
+
+        # 古い順に、各予測が「今のステップ」に対して出している action を集める
+        preds = np.stack([entry[1][entry[0]] for entry in self._ens]).astype(np.float64)
+        w = np.exp(-self.ENSEMBLE_M * np.arange(len(preds), dtype=np.float64))
+        action = (preds * (w / w.sum())[:, None]).sum(axis=0)
+        if not self.ENSEMBLE_GRIPPER:
+            action[6] = preds[-1][6]      # 最新の予測をそのまま使う
+
+        for entry in self._ens:
+            entry[0] += 1
+        while self._ens and self._ens[0][0] >= len(self._ens[0][1]):
+            self._ens.popleft()
+        return action
+
+    def _ensemble_desc(self) -> str:
+        """起動ログ用。どの設定で走っているかをサーバーログに残す。"""
+        if not self.TEMPORAL_ENSEMBLE:
+            return f"off (exec={self.N_ACTION_EXEC})"
+        return (
+            f"on h={self.ENSEMBLE_HORIZON} query={self.ENSEMBLE_QUERY_EVERY}"
+            f" m={self.ENSEMBLE_M:g} gripper={'avg' if self.ENSEMBLE_GRIPPER else 'latest'}"
+            " (exec は使わない)"
+        )
+
+    def _clear_episode_state(self) -> None:
+        """エピソード境界で捨てる状態。持ち越すと前エピソードの action が
+        次エピソードの冒頭に流れ込み、衝突の原因になる。"""
+        self._queue.clear()
+        self._ens.clear()
+        self._step = 0
 
     def _record_latency(self, dt: float) -> None:
         """/act の所要時間を記録し、遅い応答をその場で報告する。
@@ -672,8 +799,6 @@ class MyPolicy(BasePolicy):
             )
 
     def reset(self, instruction: str = "") -> None:
-        # エピソード境界。チャンクのキャッシュを持ち越すと、前エピソードの
-        # action が次エピソードの冒頭に流れ込んで衝突の原因になる。
         if self._lat_n:
             print(
                 f"[MyPolicy] 前エピソードのレイテンシ: n={self._lat_n}"
@@ -685,7 +810,7 @@ class MyPolicy(BasePolicy):
         self._lat_n = self._lat_slow = 0
 
         self.instruction = instruction
-        self._queue.clear()
+        self._clear_episode_state()
         if self.model is not None:
             self.model.reset()   # SmolVLA 内部の action queue もクリアする
 
@@ -701,7 +826,9 @@ class MyPolicy(BasePolicy):
 
         CUDA カーネルのコンパイル等は初回推論で走る。それが 1 エピソード目の
         1 ステップ目に起きると 10 秒制限に触れうるため、120 秒の枠がある
-        起動時に済ませておく。キューを都度捨てて実推論を 2 回強制する。
+        起動時に済ませておく。エピソード状態を都度捨てて実推論を 2 回強制する
+        （ensembling が有効で ENSEMBLE_QUERY_EVERY > 1 のときも、捨てないと
+        2 回目が既存の予測から作られてしまい実推論にならない）。
         """
         dummy = {
             "agentview_image": np.zeros((128, 128, 3), dtype=np.uint8),
@@ -714,7 +841,7 @@ class MyPolicy(BasePolicy):
         self._warming = True   # warmup のダミー観測はデバッグダンプの対象外
         try:
             for _ in range(2):
-                self._queue.clear()
+                self._clear_episode_state()
                 self.get_action(dummy)
         except Exception as exc:
             print(f"[MyPolicy] warmup に失敗（無視して続行）: {exc}")

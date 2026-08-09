@@ -5,6 +5,7 @@
 #
 #   bash tools/run_policy_server.sh                       # 既定 127.0.0.1:8002
 #   PARC_N_EXEC=25 bash tools/run_policy_server.sh        # A/B
+#   PARC_ENSEMBLE=1 bash tools/run_policy_server.sh       # temporal ensembling
 #   bash tools/run_policy_server.sh --port 8003
 #   PARC_OFFLINE_TEST=1 bash tools/run_policy_server.sh   # HF キャッシュを隠す
 #
@@ -58,7 +59,9 @@ fi
 
 echo "[run] python : $PY"
 echo "[run] cwd    : $PWD"
-echo "[run] flip180=${PARC_FLIP180:-1(既定)}  n_exec=${PARC_N_EXEC:-50(既定)}  debug=${PARC_DEBUG_DIR:-なし}"
+echo "[run] flip180=${PARC_FLIP180:-1(既定)}  n_exec=${PARC_N_EXEC:-5(既定)}  debug=${PARC_DEBUG_DIR:-なし}"
+echo "[run] ensemble=${PARC_ENSEMBLE:-0(既定)}  h=${PARC_ENS_H:-16(既定)}  query=${PARC_ENS_QUERY:-1(既定)}  m=${PARC_ENS_M:-0.01(既定)}"
+echo "[run] （実際に効いた設定はサーバー側の [MyPolicy] ensemble= 行で確認すること）"
 echo
 
 exec "${CLEAN[@]}" \
