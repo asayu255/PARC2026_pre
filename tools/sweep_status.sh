@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+#
+# 走行中のスイープの進捗をまとめて出す。読み取り専用で、評価には触らない。
+#
+#   bash tools/sweep_status.sh             # results/ens_*/ のラウンド（50 ep）
+#   bash tools/sweep_status.sh t4 10       # results/t4_*/ のラウンド（10 ep）
+#   watch -n 60 bash tools/sweep_status.sh t4 10   # 1 分ごとに更新
+#
+# 第 2 引数は 1 条件あたりのエピソード数。標準誤差の表示に使うだけだが、
+# ここを間違えると「読んではいけない差」を読んでしまうので合わせること。
+#
+# 3 段階で見る。
+#   1. どの条件を走っているか        … スイープ本体のログ
+#   2. その条件で何タスク終わったか  … 評価ログの「タスク評価完了」
+#   3. 終わった条件の成績            … show_ensemble_results.py
+set -uo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+PREFIX="${1:-ens}"
+EPISODES="${2:-${PARC_SWEEP_EPISODES:-50}}"
+
+echo "=== プロセス ==============================================="
+if pgrep -af 'sweep_ensemble\.sh' >/dev/null 2>&1; then
+    pgrep -af 'sweep_ensemble\.sh' | sed 's/^/  /'
+else
+    echo "  スイープは走っていない（完走したか、中断された）"
+fi
+pgrep -af 'policy_server\.py' 2>/dev/null | sed 's/^/  /'
+
+echo
+echo "=== いまどの条件か ========================================="
+SWEEPLOG="$(ls -t logs/sweep_${PREFIX}_*.log 2>/dev/null | head -1)"
+if [ -n "$SWEEPLOG" ]; then
+    echo "  ログ: $SWEEPLOG"
+    grep -E '^=== |^\[sweep\]' "$SWEEPLOG" | tail -6 | sed 's/^/  /'
+else
+    echo "  logs/sweep_${PREFIX}_*.log が無い"
+fi
+
+echo
+echo "=== 条件ごとの進み具合 ====================================="
+shopt -s nullglob
+found=0
+for log in logs/eval_${PREFIX}_*.log; do
+    found=1
+    label="${log#logs/eval_${PREFIX}_}"; label="${label%.log}"
+    # grep -c は 0 件でも "0" を出して exit 1 する。|| echo 0 を付けると
+    # "0" が 2 行になるので付けない（set -e は無いので失敗しても止まらない）。
+    done_n="$(grep -c 'タスク評価完了' "$log" 2>/dev/null)"
+    # いま走っているエピソードの進み（最後の [進捗] 行）
+    last="$(grep '\[進捗\]' "$log" 2>/dev/null | tail -1 | sed 's/.*\[進捗\] *//')"
+    printf '  %-8s タスク完了 %s   %s\n' "$label" "$done_n" "${last:-—}"
+    grep 'タスク評価完了' "$log" 2>/dev/null \
+        | sed 's/.*タスク評価完了: /      /' | cut -c1-100
+done
+[ "$found" = "1" ] || echo "  logs/eval_${PREFIX}_*.log が無い"
+
+echo
+echo "=== レイテンシ（10 秒を 1 回でも超えるとトラックが 0 点）==="
+for log in logs/server_${PREFIX}_*.log; do
+    label="${log#logs/server_${PREFIX}_}"; label="${label%.log}"
+    line="$(grep 'レイテンシ' "$log" 2>/dev/null | tail -1 | sed 's/.*レイテンシ: //')"
+    slow="$(grep -c '遅い /act' "$log" 2>/dev/null)"
+    printf '  %-8s %s  [遅延警告 %s 回]\n' "$label" "${line:-—}" "$slow"
+done
+
+echo
+echo "=== 終わった条件の成績 ====================================="
+python3 tools/show_ensemble_results.py --prefix "$PREFIX" --episodes "$EPISODES"
