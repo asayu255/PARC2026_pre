@@ -78,7 +78,11 @@ _HERE = Path(__file__).resolve().parent
 # PARC_WEIGHTS_DIR でマージ済みディレクトリを指せば、ファイルを
 # 入れ替えずに A/B が取れる。提出 zip では未設定なので影響しない。
 _WEIGHTS_DIR = Path(os.environ.get("PARC_WEIGHTS_DIR") or (_HERE / "model_weights"))
-_BACKBONE_DIR = _HERE / "smolvlm_backbone"
+
+# 採点環境は外部通信が無いので、tokenizer / VLM バックボーンもローカルに置く。
+# SmolVLA 以外のポリシー（π0 系は PaliGemma の tokenizer を要する）を試すときは
+# PARC_BACKBONE_DIR で別ディレクトリを指す。提出 zip では未設定。
+_BACKBONE_DIR = Path(os.environ.get("PARC_BACKBONE_DIR") or (_HERE / "smolvlm_backbone"))
 
 # lerobot は pip では入れられないので同梱する。
 # lerobot の必須依存に pynput があり、Linux ではこれが evdev を引く。
@@ -334,6 +338,7 @@ class MyPolicy(BasePolicy):
         self._lat_sum = 0.0
         self._lat_n = 0
         self._lat_slow = 0
+        self.policy_type = "smolvla"   # _load_model が config から上書きする
         self.model = self._load_model()
         self._warmup()
 
@@ -366,17 +371,27 @@ class MyPolicy(BasePolicy):
 
         import torch
         from lerobot.configs.policies import PreTrainedConfig
-        from lerobot.policies.factory import make_pre_post_processors
-        from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+        from lerobot.policies.factory import get_policy_class, make_pre_post_processors
 
         self.torch = torch
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
         cfg = PreTrainedConfig.from_pretrained(str(_WEIGHTS_DIR), local_files_only=True)
 
+        # ポリシー種別は config.json の type から引く。SmolVLA を決め打ちしない。
+        # 以降の processor / 画像キー / state 次元の解決はすべて保存済み設定から
+        # 導いているので、重みを差し替えるだけで別のポリシーを評価できる。
+        self.policy_type = getattr(cfg, "type", "smolvla")
+        policy_cls = get_policy_class(self.policy_type)
+
         # 採点環境は外部通信が無く HF キャッシュも存在しない。
         # バックボーンを同梱している場合はローカルパスを見るよう差し替える。
-        if _BACKBONE_DIR.is_dir():
+        # vlm_model_name を持つのは SmolVLA だけで、π0 系は VLM を config から
+        # 構築する（重みは checkpoint に入っている）ため、この差し替えは不要。
+        # 無い属性を勝手に生やさないよう、存在を見てから触る。
+        if not hasattr(cfg, "vlm_model_name"):
+            print(f"[MyPolicy] {self.policy_type}: vlm_model_name を持たないので差し替え不要")
+        elif _BACKBONE_DIR.is_dir():
             cfg.vlm_model_name = str(_BACKBONE_DIR)
             print(f"[MyPolicy] VLM backbone: {_BACKBONE_DIR}")
         else:
@@ -404,7 +419,7 @@ class MyPolicy(BasePolicy):
             )
             cfg.num_steps = steps_override
 
-        model = SmolVLAPolicy.from_pretrained(
+        model = policy_cls.from_pretrained(
             str(_WEIGHTS_DIR), config=cfg, local_files_only=True
         )
         model = model.eval().to(self.device)
@@ -433,7 +448,7 @@ class MyPolicy(BasePolicy):
         print(
             f"[MyPolicy] weights: {_WEIGHTS_DIR}"
             f"{' (PARC_WEIGHTS_DIR)' if os.environ.get('PARC_WEIGHTS_DIR') else ''}"
-            f"\n[MyPolicy] SmolVLA ready | device={self.device}"
+            f"\n[MyPolicy] {self.policy_type} ready | device={self.device}"
             f" | state_dim={self.state_dim} | chunk={self.ACTION_CHUNK_SIZE}"
             f" | exec={self.N_ACTION_EXEC} | flip180={self.FLIP_IMAGES_180}"
             f"\n[MyPolicy]   main={self.key_main} wrist={self.key_wrist}"
