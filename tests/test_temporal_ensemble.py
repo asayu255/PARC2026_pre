@@ -5,8 +5,9 @@
 
 ここで守りたいのは主に 2 つである。
 
-- **既定が off のままであること。** 3 回目の採点 0.077 はこの経路で出した
-  数字であり、A/B で確認するまで既定を動かしてはいけない
+- **既定が on で h=8 であること。** stove 50 エピソードと公開 4 タスクの
+  2 ラウンドで jerk が −38〜42% 再現したうえでこの既定にした（§29）。
+  意図せず戻ると、その改善が黙って消える
 - ensembling を有効にしたときに、前エピソードの予測が次エピソードへ
   漏れないこと。漏れると衝突（1mm 判定）の直接の原因になる
 
@@ -107,26 +108,28 @@ def drive(policy, steps):
 # --- 既定値 -----------------------------------------------------------------
 
 
-def test_defaults_keep_the_graded_configuration(monkeypatch):
-    """既定は ensembling 無効・n_exec=5。採点 0.077 を出した構成である。"""
+def test_defaults_are_the_adopted_configuration(monkeypatch):
+    """既定は ensembling 有効・h=8。§29.9 で採用した構成である。"""
     cfg = load_module(monkeypatch).MyPolicy
-    assert cfg.TEMPORAL_ENSEMBLE is False
-    assert cfg.N_ACTION_EXEC == 5
-
-
-def test_ensemble_defaults(monkeypatch):
-    cfg = load_module(monkeypatch, PARC_ENSEMBLE=1).MyPolicy
     assert cfg.TEMPORAL_ENSEMBLE is True
-    assert (cfg.ENSEMBLE_HORIZON, cfg.ENSEMBLE_QUERY_EVERY) == (16, 1)
+    assert cfg.ENSEMBLE_HORIZON == 8
+    assert cfg.ENSEMBLE_QUERY_EVERY == 1   # 毎ステップ推論
     assert cfg.ENSEMBLE_M == 0.01          # ACT の k と同値
     assert cfg.ENSEMBLE_GRIPPER is True
+
+
+def test_ensembling_can_be_turned_off(monkeypatch):
+    """PARC_ENSEMBLE=0 で従来の N_ACTION_EXEC 経路へ戻せる。"""
+    cfg = load_module(monkeypatch, PARC_ENSEMBLE=0).MyPolicy
+    assert cfg.TEMPORAL_ENSEMBLE is False
+    assert cfg.N_ACTION_EXEC == 5
 
 
 # --- 無効時: 既存の n_exec 経路が変わっていないこと --------------------------
 
 
 def test_disabled_path_is_unchanged(monkeypatch):
-    mod = load_module(monkeypatch)
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0)
     p = make_policy(mod, ramp())
 
     got = drive(p, 11)
@@ -140,7 +143,8 @@ def test_disabled_path_is_unchanged(monkeypatch):
 
 
 def test_queries_every_step_and_averages_overlapping_predictions(monkeypatch):
-    p = make_policy(load_module(monkeypatch, PARC_ENSEMBLE=1), ramp())
+    # h を明示する。既定は 8 だが、頭打ちの検証には広いほうが見やすい。
+    p = make_policy(load_module(monkeypatch, PARC_ENS_H=16), ramp())
 
     got = drive(p, 30)
 
@@ -179,8 +183,8 @@ def test_smooths_resampling_noise(monkeypatch):
     def jerk(seq):
         return float(np.sqrt((np.diff(np.asarray(seq), 3, axis=0) ** 2).mean()))
 
-    off = make_policy(load_module(monkeypatch), noisy())
-    on = make_policy(load_module(monkeypatch, PARC_ENSEMBLE=1), noisy())
+    off = make_policy(load_module(monkeypatch, PARC_ENSEMBLE=0), noisy())
+    on = make_policy(load_module(monkeypatch), noisy())
 
     j_off = jerk([off.get_action(OBS) for _ in range(150)])
     j_on = jerk([on.get_action(OBS) for _ in range(150)])
