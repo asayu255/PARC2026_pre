@@ -13,6 +13,7 @@
 #   PARC_LORA_LR=1e-4
 #   PARC_LORA_AUG=0              1 で image_transforms を有効化
 #   PARC_LORA_LOWRES=0           1 で学習画像を評価解像度（128）まで落とす。§33
+#   PARC_LORA_ACTION_DIM=0       7 で損失を本物の action 次元だけに絞る。§34.7
 #   PARC_LORA_TAG=all40          出力先 runs/lora_<tag> の識別子
 #   CUDA_VISIBLE_DEVICES=0       もう 1 枚は評価用に空けておく
 #
@@ -96,7 +97,12 @@ fi
 LOWRES="${PARC_LORA_LOWRES:-0}"
 LOWRES_RES="${PARC_LORA_LOWRES_RES:-128}"
 LOWRES_MODE="${PARC_LORA_LOWRES_MODE:-down}"
-if [ "$LOWRES" != "0" ]; then
+
+# 損失をゼロ埋め次元へ流さない（§34.7）。7 が PARC の action 次元。
+# 解像度の劣化とは独立に切れる。どちらか片方でもラッパー経由にする。
+ACTION_DIM="${PARC_LORA_ACTION_DIM:-0}"
+
+if [ "$LOWRES" != "0" ] || [ "$ACTION_DIM" != "0" ]; then
     TRAIN_LAUNCH=("$PY" "$ROOT/tools/train_lora_lowres.py")
 else
     TRAIN_LAUNCH=("$TRAIN_BIN")
@@ -294,6 +300,11 @@ if [ "$LOWRES" != "0" ]; then
 else
     echo "   解像度      : データセットのまま 256x256（評価は 128。PARC_LORA_LOWRES=1 で揃う）"
 fi
+if [ "$ACTION_DIM" != "0" ]; then
+    echo "   損失の次元  : 先頭 $ACTION_DIM 次元のみ（ゼロ埋め $((32 - ACTION_DIM)) 次元を勾配から外す）"
+else
+    echo "   損失の次元  : lerobot のまま 32 次元（うち 25 はゼロ埋め。§34.7）"
+fi
 if [ "$EMPTY_CAMERAS" = "keep" ]; then
     echo "   画像スロット: ベース config のまま（5 枚）"
 else
@@ -316,6 +327,8 @@ fi
 exec "${CLEAN[@]}" \
     CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" \
     TOKENIZERS_PARALLELISM=false \
+    PARC_LORA_LOWRES="$LOWRES" \
     PARC_LORA_LOWRES_RES="$LOWRES_RES" \
     PARC_LORA_LOWRES_MODE="$LOWRES_MODE" \
+    PARC_LORA_ACTION_DIM="$ACTION_DIM" \
     "${CMD[@]}"

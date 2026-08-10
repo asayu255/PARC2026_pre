@@ -15,6 +15,9 @@ SmolVLA はどちらも 512 へ引き伸ばすので**差は鮮鋭度だけ**で
     PARC_LORA_LOWRES_RES=128     落とす先の解像度。評価と同じ 128 が既定
     PARC_LORA_LOWRES_MODE=down   down: 128 のまま渡す（評価と同一経路）
                                  roundtrip: 128 へ落として元サイズへ戻す
+    PARC_LORA_LOWRES=0/1         解像度の劣化そのものを掛けるか（既定 1）
+    PARC_LORA_ACTION_DIM=0       >0 で損失をその次元数に限定する。7 が PARC の
+                                 action 次元。§34.7。0 なら lerobot のまま
 
 なぜ monkeypatch なのか
 -----------------------
@@ -34,18 +37,20 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import action_dim_loss  # noqa: E402
 from lowres_transform import MODES, ComposeAfter, ResolutionDegradation  # noqa: E402
 
 
-def _env_int(name: str, default: int) -> int:
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
     raw = os.environ.get(name)
     if raw is None:
         return default
     try:
-        return int(raw)
+        value = int(raw)
     except ValueError:
         print(f"[lowres] {name}={raw!r} を整数として読めない。既定 {default} を使う。")
         return default
+    return max(value, minimum)
 
 
 def install_patch(res: int, mode: str) -> None:
@@ -77,8 +82,19 @@ def main() -> None:
     if mode not in MODES:
         raise SystemExit(f"PARC_LORA_LOWRES_MODE は {MODES} のいずれか（{mode!r} が指定された）")
 
-    print(f"[lowres] ラッパー経由で lerobot-train を起動する（res={res} mode={mode}）", flush=True)
-    install_patch(res, mode)
+    # 解像度の劣化と、損失の次元制限は独立に切れる。
+    # 片方だけ試せないと、効いたのがどちらか分からなくなる。
+    do_lowres = os.environ.get("PARC_LORA_LOWRES", "1") != "0"
+    action_dim = _env_int("PARC_LORA_ACTION_DIM", 0, minimum=0)
+
+    if do_lowres:
+        print(f"[lowres] ラッパー経由で lerobot-train を起動する（res={res} mode={mode}）", flush=True)
+        install_patch(res, mode)
+    else:
+        print("[lowres] 解像度の劣化は無効（PARC_LORA_LOWRES=0）", flush=True)
+
+    if action_dim > 0:
+        action_dim_loss.install_patch(action_dim)
 
     from lerobot.scripts.lerobot_train import main as train_main
 
