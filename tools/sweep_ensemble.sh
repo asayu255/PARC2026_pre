@@ -68,7 +68,7 @@ CONDS="${PARC_SWEEP_CONDS:-base: h16:PARC_ENSEMBLE=1 h8:PARC_ENSEMBLE=1,PARC_ENS
 # スイープを始めると起きうる事故で、しかも静かに起きる。重みを振りたい場合は
 # 条件側に `label:PARC_WEIGHTS_DIR=...` と書けばよい。
 KNOBS=(PARC_ENSEMBLE PARC_ENS_H PARC_ENS_QUERY PARC_ENS_M PARC_ENS_GRIPPER
-       PARC_N_EXEC PARC_WEIGHTS_DIR)
+       PARC_N_EXEC PARC_WEIGHTS_DIR PARC_NUM_STEPS)
 CLEAR=(); for k in "${KNOBS[@]}"; do CLEAR+=(-u "$k"); done
 
 LABELS=""

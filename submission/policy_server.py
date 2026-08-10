@@ -386,10 +386,32 @@ class MyPolicy(BasePolicy):
                 " HF キャッシュから解決するため、採点環境では起動に失敗する。"
             )
 
+        # flow matching の積分ステップ数（config の既定は 10）。
+        # sample_actions は速度場を Euler 法で 1 -> 0 まで積分する
+        # （modeling_smolvla.py: dt = -1/num_steps のループ）。増やすほど
+        # 積分誤差が小さくなり、同じモデルからより正確な action が出る。
+        #
+        # VLM の prefix は KV キャッシュされてループの外なので、増える計算は
+        # action expert の denoise_step だけである。レイテンシは採点実測で
+        # max 0.463 秒（制限 10 秒に対し 21 倍の余裕）なので予算はある。
+        #
+        # 既定は config のまま（＝挙動を変えない）。A/B は PARC_NUM_STEPS で行う。
+        steps_override = _env_int("PARC_NUM_STEPS", 0, minimum=0)
+        if steps_override:
+            print(
+                f"[MyPolicy] num_steps: {getattr(cfg, 'num_steps', '?')}"
+                f" -> {steps_override}"
+            )
+            cfg.num_steps = steps_override
+
         model = SmolVLAPolicy.from_pretrained(
             str(_WEIGHTS_DIR), config=cfg, local_files_only=True
         )
         model = model.eval().to(self.device)
+        # from_pretrained が config を読み直す場合に備えて、実体側でも上書きを確認する。
+        if steps_override and getattr(model.config, "num_steps", None) != steps_override:
+            model.config.num_steps = steps_override
+            print(f"[MyPolicy] num_steps をモデル側にも適用: {steps_override}")
 
         import lerobot
         print(f"[MyPolicy] lerobot: {Path(lerobot.__file__).parent}")
@@ -416,6 +438,7 @@ class MyPolicy(BasePolicy):
             f" | exec={self.N_ACTION_EXEC} | flip180={self.FLIP_IMAGES_180}"
             f"\n[MyPolicy]   main={self.key_main} wrist={self.key_wrist}"
             f"\n[MyPolicy]   ensemble={self._ensemble_desc()}"
+            f" | num_steps={getattr(model.config, 'num_steps', '?')}"
         )
         return model
 
