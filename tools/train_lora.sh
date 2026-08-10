@@ -12,6 +12,7 @@
 #   PARC_LORA_EP_PER_TASK=60
 #   PARC_LORA_LR=1e-4
 #   PARC_LORA_AUG=0              1 で image_transforms を有効化
+#   PARC_LORA_LOWRES=0           1 で学習画像を評価解像度（128）まで落とす。§33
 #   PARC_LORA_TAG=all40          出力先 runs/lora_<tag> の識別子
 #   CUDA_VISIBLE_DEVICES=0       もう 1 枚は評価用に空けておく
 #
@@ -82,6 +83,23 @@ TRAIN_BIN="$(dirname "$PY")/lerobot-train"
 if [ ! -x "$TRAIN_BIN" ]; then
     echo "ERROR: $TRAIN_BIN が無い。" >&2
     exit 1
+fi
+
+# --- 学習画像を評価解像度まで落とす（§33）------------------------------------
+# ベースの学習データは 256x256、PARC の評価は 128x128。SmolVLA はどちらも
+# 512 へ引き伸ばすので差は鮮鋭度だけである。§27 の LoRA 失敗で 5 仮説を
+# 潰したあとに残った説明がこれなので、消せるようにしてある。
+#
+# lerobot-train の CLI では表現できない（image_transforms は確率的に一部だけ
+# 適用する augmentation の枠組みで、enable=false だと None にされる）ため、
+# LeRobotDataset を patch するラッパー経由で起動する。
+LOWRES="${PARC_LORA_LOWRES:-0}"
+LOWRES_RES="${PARC_LORA_LOWRES_RES:-128}"
+LOWRES_MODE="${PARC_LORA_LOWRES_MODE:-down}"
+if [ "$LOWRES" != "0" ]; then
+    TRAIN_LAUNCH=("$PY" "$ROOT/tools/train_lora_lowres.py")
+else
+    TRAIN_LAUNCH=("$TRAIN_BIN")
 fi
 
 # 評価側シェルの副作用（venv / OSMesa / LIBERO-plus の PYTHONPATH）を持ち込まない。
@@ -231,7 +249,7 @@ if [ -n "$RENAME_MAP" ]; then
 fi
 
 CMD=(
-    "$TRAIN_BIN"
+    "${TRAIN_LAUNCH[@]}"
     --policy.path="$BASE_MODEL"
     --policy.vlm_model_name="$BACKBONE"
     --policy.push_to_hub=false
@@ -271,6 +289,11 @@ echo "   エピソード  : $N_EPISODES 本（$EP_PER_TASK / タスク）"
 echo "   r           : $R   （lora_alpha は peft 既定。実効強度 = alpha/r）"
 echo "   steps       : $STEPS   batch: $BATCH   lr: $LR -> $FINAL_LR"
 echo "   拡張        : ${PARC_LORA_AUG:-0}   動画: $VIDEO_BACKEND"
+if [ "$LOWRES" != "0" ]; then
+    echo "   解像度      : 学習画像を ${LOWRES_RES}x${LOWRES_RES} へ劣化（mode=$LOWRES_MODE）← 評価と同じ"
+else
+    echo "   解像度      : データセットのまま 256x256（評価は 128。PARC_LORA_LOWRES=1 で揃う）"
+fi
 if [ "$EMPTY_CAMERAS" = "keep" ]; then
     echo "   画像スロット: ベース config のまま（5 枚）"
 else
@@ -293,4 +316,6 @@ fi
 exec "${CLEAN[@]}" \
     CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" \
     TOKENIZERS_PARALLELISM=false \
+    PARC_LORA_LOWRES_RES="$LOWRES_RES" \
+    PARC_LORA_LOWRES_MODE="$LOWRES_MODE" \
     "${CMD[@]}"

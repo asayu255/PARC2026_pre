@@ -3,7 +3,7 @@
 最終更新: 2026-08-10 / ホスト: `yamabuki`（`wakaba` と共有ホーム）/
 ブランチ: `claude/repository-code-progress-check-cconqv`
 
-詳細な作業記録は [ENVIRONMENT_SETUP.md](ENVIRONMENT_SETUP.md)（2,374 行、時系列）。
+詳細な作業記録は [ENVIRONMENT_SETUP.md](ENVIRONMENT_SETUP.md)（時系列）。
 本書はその要約で、節番号は同ファイルを指す。
 
 ---
@@ -119,8 +119,11 @@ ensembling が改善したのは軌道の**滑らかさ**であって、上の�
   （`pipeline/config.py:51` の `LIBERO_EVAL_CAMERA` の既定値。**評価側の設定**なので
   提出物からは変えられない。実際に届く画像も 128×128）
 - 画素数が 1/4 になる。§27 の LoRA 失敗の残る説明もこれである
-- 対策案: 学習時に「128 へ縮小してから戻す」劣化を入れる
-  （lerobot の標準 transform には無く、カスタム実装が要る）
+- **実装済み・未実行**（§33）。`PARC_LORA_LOWRES=1 bash tools/train_lora.sh`
+  で学習画像を 128 に落とす。SmolVLA は何でも 512 に引き伸ばすので、
+  **縮小したまま渡すと評価と完全に同一の経路**になる（戻す必要は無かった）
+- step 5,000 の checkpoint が出た時点で先に評価する。§27 では損傷が序盤で
+  起きていたので、そこでベース付近に居なければ回し切る意味は薄い
 - 判定は **§26 のゲート**（公開 4 タスクで 82.5% 超、collision 悪化なし）
 
 **このとき jerk を判定に使ってはいけない。** モデルに触らず推論を混ぜるだけで
@@ -140,8 +143,11 @@ ensembling が改善したのは軌道の**滑らかさ**であって、上の�
 | `tools/sweep_status.sh` | 走行中スイープの進捗を 1 コマンドで表示 |
 | `tools/show_ensemble_results.py` | 結果 JSON から比較表（`--per-task` で内訳） |
 | `tools/train_lora.sh` / `tools/merge_lora.py` | 追加学習とマージ（§27 で使用） |
+| `tools/lowres_transform.py` | 学習画像を評価解像度へ落とす劣化変換（§33） |
+| `tools/train_lora_lowres.py` | 上を挿し込んで lerobot-train を起動するラッパー |
 | `tools/inspect_dataset.py` | libero_plus のメタデータを動画無しで確認 |
 | `tests/test_temporal_ensemble.py` | ensembling の単体テスト（既定値を固定） |
+| `tests/test_lowres_transform.py` | 解像度劣化の単体テスト（評価経路との一致を固定） |
 
 実験用のつまみはすべて環境変数で、**提出時は未設定なので既定が効く**。
 
@@ -155,3 +161,4 @@ ensembling が改善したのは軌道の**滑らかさ**であって、上の�
 | `PARC_N_EXEC` | `5` | ensembling 無効時のみ有効 |
 | `PARC_WEIGHTS_DIR` | 未設定 | 別の重みを指す（追加学習の評価用） |
 | `PARC_FLIP180` | `1` | 画像の 180 度回転 |
+| `PARC_LORA_LOWRES` | `0` | **学習時のみ。** 1 で学習画像を評価解像度へ落とす |

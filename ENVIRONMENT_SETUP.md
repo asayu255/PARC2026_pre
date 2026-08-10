@@ -2376,3 +2376,139 @@ ensembling はスコアを 0.077 → 0.188 に上げたが、**このどちら�
 **そのとき jerk を判定に使ってはいけない。** jerk はモデルの能力とは独立に
 動く量で（推論を混ぜるだけで 38% 下がった）、追加学習の良し悪しを測る
 指標ではない。
+
+---
+
+## 33. 解像度差を埋める追加学習（実装済み・未実行）
+
+§27.3 に挙げた 3 つの再開案のうち、本命の「解像度を揃える」を実装した。
+**まだ学習は回していない。**
+
+### 33.1 差は鮮鋭度だけである（lerobot 0.4.4 の実装で確認）
+
+SmolVLA は入力画像を必ず 512x512 へ引き伸ばしてから使う。
+
+- `SmolVLAConfig.resize_imgs_with_padding = (512, 512)`
+  （`lerobot/policies/smolvla/configuration_smolvla.py:48`）
+- `SmolVLAPolicy.prepare_images` が `resize_with_pad(img, 512, 512, pad_value=0)`
+  を呼ぶ（`modeling_smolvla.py:403-420`）。中身は
+  `F.interpolate(..., mode="bilinear", align_corners=False)` + 左上パディング
+
+つまり**モデルが見るテンソルのサイズは学習時も評価時も 512 で同じ**であり、
+違うのは元画像の鮮鋭度だけである。
+
+| | 元画像 | 512 までの拡大率 |
+|---|---|---|
+| 学習（`lerobot/libero_plus`） | 256x256 | 2 倍 |
+| 評価（PARC） | **128x128** | **4 倍**（こちらがぼける） |
+
+評価側の 128 は `pipeline/config.py:51` の `LIBERO_EVAL_CAMERA` の既定値で、
+**評価側の設定なので提出物からは変えられない**。埋めるなら学習側を落とすしかない。
+
+### 33.2 128 に落としても正規化は壊れない
+
+学習画像のサイズを変えることになるので、壊れないかを先に確認した。
+
+- **画像の shape 検証は無い。** `configs/policies.py` にも
+  `configuration_smolvla.py` にも、入力画像の H×W を照合する箇所は無い
+- **正規化統計はチャンネル単位**である。`compute_stats.py` の
+  `_reshape_for_image_stats` が `axis=(0,2,3)` で潰すので `(3,1,1)`。
+  どの H×W にもブロードキャストできる（`--dataset.use_imagenet_stats=false`
+  のときも同じ）
+
+### 33.3 実装: `mode="down"`（既定）は評価と同一経路になる
+
+| モード | 動作 | 評価との一致 |
+|---|---|---|
+| **`down`（既定）** | 128 へ縮小して**そのまま渡す** | **完全一致。**そこから先は評価と同じ `resize_with_pad` を通る |
+| `roundtrip` | 128 へ落として 256 へ戻す | 補間が 1 段多く厳密には不一致。サイズを変えたくない場合の逃げ道 |
+
+§27.3 の当初案は「128 へ縮小してから戻す」だったが、`prepare_images` が
+何でも 512 にすると分かったので、**戻さないほうが厳密に一致する**。
+既定を `down` にしたのはこのためである。
+
+縮小は `antialias=True` で行う。評価側の 128 は MuJoCo が最初から 128 で
+描いたものなので、エイリアスの乗った素朴な間引きより帯域制限された縮小の
+ほうが近い。
+
+### 33.4 なぜ monkeypatch なのか
+
+lerobot の `image_transforms` は使えない。
+
+- `RandomSubsetApply` で**確率的に一部だけ**適用する augmentation の仕組みで、
+  全フレームへの決定的な適用ができない（`datasets/transforms.py:232`）
+- `--dataset.image_transforms.enable=false`（既定）だと
+  `make_dataset` が `image_transforms=None` にする（`datasets/factory.py:83`）
+
+そこで `tools/train_lora_lowres.py` が `LeRobotDataset.__init__` を包み、
+`self.image_transforms` を差し替える。データセットは `__getitem__` の中で
+毎回 `self.image_transforms` を読む（`lerobot_dataset.py:1104`）ので後から
+差し替えても効く。既存の augmentation があれば**その後段**に劣化を足す
+（拡張は元の解像度で掛けたいため）。
+
+### 33.5 使い方
+
+```bash
+PARC_LORA_LOWRES=1 PARC_LORA_TAG=lowres \
+  nohup bash tools/train_lora.sh > "logs/train_lowres_$$.log" 2>&1 &
+```
+
+起動時に効いていることがログに出る。**これが出ていなければ劣化していない。**
+
+```text
+[lowres] ラッパー経由で lerobot-train を起動する（res=128 mode=down）
+[lowres] 画像を 128x128 へ劣化させる（mode=down）。カメラ: [...]
+   解像度      : 学習画像を 128x128 へ劣化（mode=down）← 評価と同じ
+```
+
+つまみは `PARC_LORA_LOWRES_RES`（既定 128）と
+`PARC_LORA_LOWRES_MODE`（`down` / `roundtrip`）。
+それ以外の設定は §27 で修正済みの既定をそのまま使う
+（`rename_map` あり、`empty_cameras=keep`、`full_training_modules=[]`）。
+
+`tests/test_lowres_transform.py` で変換と patch を固定している
+（13 件。lerobot がある環境ではさらに 1 件、`resize_with_pad` の写しが
+本物と一致することも検証する）。
+
+```bash
+python -m pytest tests/test_lowres_transform.py -q
+```
+
+### 33.6 評価と判定
+
+`--save_freq=5000` なので 5,000 / 10,000 / 15,000 step の checkpoint が残る。
+**step 5,000 が出た時点で先に評価すること。** §27 では step 5,000 で既に
+45.0%（step 15,000 の 50.0% より悪い）で、**損傷は序盤で起きていた**。
+解像度が原因だったなら、この 5,000 の時点でベース（82.5%）付近に居るはずで、
+そうでなければ 15,000 まで回す意味は薄い。
+
+```bash
+# マージ
+python tools/merge_lora.py --run runs/lora_lowres_r8 --out runs/merged_lowres_r8
+
+# ターミナル A
+PARC_WEIGHTS_DIR=$PWD/runs/merged_lowres_r8 bash tools/run_policy_server.sh
+# ターミナル B
+source activate_parc.sh
+python -m pipeline --server-url http://127.0.0.1:8002 --track track1 \
+  --n-episodes 10 --max-steps 300 --timeout 10 --seed 42 \
+  --output-dir results/lowres 2>&1 | tee logs/eval_lowres.log
+```
+
+判定ゲートは §26 のまま。**公開 4 タスクで 82.5% を上回り、collision が
+悪化していないこと。** 同じ日に `base` も測り直して同一ラウンドで比べること
+（§29.7 で記録値との比較は当てにならないと分かっている）。
+
+**jerk を判定に使ってはいけない**（§32.5）。推論を混ぜるだけで 38% 動く量で、
+モデルの良し悪しとは独立である。
+
+### 33.7 これで何が分かるか
+
+- **82.5% を超える** → 解像度差が §27 の失敗の原因だった。追加学習の道が開く
+- **50% 付近のまま** → 解像度は原因ではない。§27 で潰した 5 仮説に加えて
+  6 つ目も外れたことになり、LoRA という手段自体を疑う番になる
+  （`train_expert_only=false` で VLM 側も動かす、lr をさらに下げる）
+- **その中間** → 部分的に効いている。step 15,000 まで回して再評価する
+
+いずれにせよ**採点は消費しない**。公開 4 タスクの回帰ゲートを通ってから
+提出を考える。
