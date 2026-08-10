@@ -2482,12 +2482,23 @@ python -m pytest tests/test_lowres_transform.py -q
 解像度が原因だったなら、この 5,000 の時点でベース（82.5%）付近に居るはずで、
 そうでなければ 15,000 まで回す意味は薄い。
 
-```bash
-# マージ（run_dir は位置引数。--step で checkpoint を選ぶ。既定は最終）
-python tools/merge_lora.py runs/lora_lowres_r8 --step 5000 --out runs/merged_lowres_s5000
+**`merge_lora.py` は parc-policy の python で実行すること。** torch も lerobot も
+peft も conda base には無い。間違えると `ModuleNotFoundError: No module named
+'torch'` で落ちる（実際に踏んだ）。いまは正しいコマンドを添えて落ちる。
 
-# ターミナル A
-PARC_WEIGHTS_DIR=$PWD/runs/merged_lowres_s5000 bash tools/run_policy_server.sh
+**学習中に評価する場合は GPU を分けること。** 学習は `CUDA_VISIBLE_DEVICES=0`
+を使う。同じ GPU に評価サーバーを載せると学習が遅くなるうえ、レイテンシの
+測定も汚れる（§1 に GPU 競合で 10 秒ストールが起きた記録がある）。
+
+```bash
+CONDA_PY=$HOME/miniforge3/envs/parc-policy/bin/python
+
+# マージ（run_dir は位置引数。--step で checkpoint を選ぶ。既定は最終）
+$CONDA_PY tools/merge_lora.py runs/lora_lowres_r8 --step 5000 --out runs/merged_lowres_s5000
+
+# ターミナル A（学習が GPU 0 を使っているので 1 番へ逃がす）
+CUDA_VISIBLE_DEVICES=1 PARC_WEIGHTS_DIR=$PWD/runs/merged_lowres_s5000 \
+  bash tools/run_policy_server.sh
 # ターミナル B
 source activate_parc.sh
 python -m pipeline --server-url http://127.0.0.1:8002 --track track1 \

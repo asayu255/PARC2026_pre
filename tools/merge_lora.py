@@ -20,8 +20,26 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import os
 import shutil
+import sys
 from pathlib import Path
+
+
+def find_policy_python() -> str:
+    """parc-policy の python を探す（run_policy_server.sh と同じ方針）。
+
+    エラーメッセージにそのまま貼れるコマンドを作るためだけに使う。
+    見つからなければプレースホルダを返す。
+    """
+    env = os.environ.get("PARC_POLICY_PYTHON")
+    if env:
+        return env
+    for base in ("miniforge3", "miniconda3", "anaconda3"):
+        candidate = Path.home() / base / "envs" / "parc-policy" / "bin" / "python"
+        if candidate.is_file():
+            return str(candidate)
+    return "/path/to/envs/parc-policy/bin/python"
 
 # preprocessor / postprocessor は policy.save_pretrained() の対象外なので
 # 学習チェックポイント（無ければベース）から持ってくる。
@@ -107,14 +125,23 @@ def main() -> None:
     print(f"base       : {base}")
     print(f"out        : {out}\n")
 
-    import torch
+    # torch / lerobot / peft は parc-policy にしか入っていない。conda base の
+    # python で叩くと ModuleNotFoundError になる。素の traceback だと原因が
+    # 「インタプリタを間違えた」ことだと分かりにくいので、直せる形で落とす。
+    try:
+        import torch
 
-    # lerobot 0.4.4 の lerobot.configs は名前空間パッケージで PreTrainedConfig を
-    # 再エクスポートしない（`from lerobot.configs import ...` は unknown location で
-    # 失敗する）。policy_server.py:262 と同じ場所から取る。
-    from lerobot.configs.policies import PreTrainedConfig
-    from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
-    from peft import PeftModel
+        # lerobot 0.4.4 の lerobot.configs は名前空間パッケージで PreTrainedConfig を
+        # 再エクスポートしない（`from lerobot.configs import ...` は unknown location で
+        # 失敗する）。policy_server.py:262 と同じ場所から取る。
+        from lerobot.configs.policies import PreTrainedConfig
+        from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+        from peft import PeftModel
+    except ModuleNotFoundError as exc:
+        raise SystemExit(
+            f"{exc.name} が見つからない。parc-policy の python で実行すること:\n"
+            f"    {find_policy_python()} {' '.join(sys.argv)}"
+        ) from exc
 
     config = PreTrainedConfig.from_pretrained(str(checkpoint), local_files_only=True)
     config.device = "cpu"
