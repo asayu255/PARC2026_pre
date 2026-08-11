@@ -490,6 +490,27 @@ class MyPolicy(BasePolicy):
         self.state_dim = 8
         self.ACTION_CHUNK_SIZE = oft_policy.NUM_ACTIONS_CHUNK
 
+        # 提出 zip では環境変数を一切設定できないので、ここの既定がそのまま
+        # 採点で走る構成になる。SmolVLA 用の既定（ensembling on / gripper 平均）
+        # をそのまま使うと、一度も測っていない構成で採点されることになる。
+        #
+        # OFT の既定は本家 run_libero_eval の GenerateConfig に合わせる
+        # （num_open_loop_steps=8、ensembling なし）。LIBERO-Plus で 79.6 が
+        # 出たのはその構成であり、こちらが勝手に足したものではない。
+        #
+        # gripper を平均してはいけない。OFT の gripper は sign() で ±1 に
+        # 二値化されているため、平均すると中間値になって二値化が壊れる。
+        # ensembling を使う場合も最新の予測をそのまま採る。
+        if "PARC_ENSEMBLE" not in os.environ:
+            self.TEMPORAL_ENSEMBLE = False
+            self.N_ACTION_EXEC = oft_policy.NUM_ACTIONS_CHUNK
+            print(
+                "[MyPolicy] OFT の既定として ensembling を無効にし"
+                f" exec={self.N_ACTION_EXEC} にする（本家 num_open_loop_steps）"
+            )
+        if "PARC_ENS_GRIPPER" not in os.environ:
+            self.ENSEMBLE_GRIPPER = False
+
         gripper = os.environ.get("PARC_OFT_GRIPPER", "binarize")
         self.oft = oft_policy.OFTModel(
             _WEIGHTS_DIR,
