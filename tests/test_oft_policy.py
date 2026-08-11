@@ -286,18 +286,32 @@ def test_the_prismatic_shim_exposes_what_modeling_prismatic_imports():
 # しかも結果を見ても区別がつかない。
 
 
-def _load_env_from(tmp_path, text, monkeypatch, preset=None):
-    import importlib.util
+def _exec_loader(tmp_path):
+    """policy_server.py から _load_submission_env だけを取り出して動かす。
 
+    モジュールごと import すると torch や重みのロードまで走るので、対象の
+    関数だけを切り出す。終端は行頭の呼び出し `\n_load_submission_env()` で
+    探す。`_load_submission_env()` をそのまま探すと **定義行そのもの**
+    （`def _load_submission_env() -> None:`）にヒットして 4 文字しか
+    取り出せない。
+    """
+    import os
+
+    src = (_ROOT / "submission" / "policy_server.py").read_text()
+    start = src.index("def _load_submission_env")
+    end = src.index("\n_load_submission_env()", start)
+    ns = {"os": os, "_HERE": tmp_path}
+    exec(src[start:end], ns)          # noqa: S102 - 関数 1 つだけを取り出して動かす
+    assert "_load_submission_env" in ns, "関数を取り出せていない"
+    return ns
+
+
+def _load_env_from(tmp_path, text, monkeypatch, preset=None):
     for k, v in (preset or {}).items():
         monkeypatch.setenv(k, v)
     (tmp_path / "parc_env").write_text(text)
 
-    src = (_ROOT / "submission" / "policy_server.py").read_text()
-    start = src.index("def _load_submission_env")
-    end = src.index("_load_submission_env()", start)
-    ns = {"os": __import__("os"), "_HERE": tmp_path}
-    exec(src[start:end], ns)          # noqa: S102 - 関数 1 つだけを取り出して動かす
+    ns = _exec_loader(tmp_path)
     ns["_load_submission_env"]()
 
 
@@ -340,17 +354,8 @@ def test_keys_outside_the_parc_namespace_are_ignored(tmp_path, monkeypatch):
     assert "LD_PRELOAD" not in os.environ
 
 
-def test_a_missing_file_is_not_an_error(tmp_path, monkeypatch):
-    import importlib.util
-    import os
-
-    src = (_ROOT / "submission" / "policy_server.py").read_text()
-    start = src.index("def _load_submission_env")
-    end = src.index("_load_submission_env()", start)
-    ns = {"os": os, "_HERE": tmp_path}
-    exec(src[start:end], ns)          # noqa: S102
-
-    ns["_load_submission_env"]()      # 例外が出ないこと
+def test_a_missing_file_is_not_an_error(tmp_path):
+    _exec_loader(tmp_path)["_load_submission_env"]()      # 例外が出ないこと
 
 
 # --- TTA（空間方向の平均）-----------------------------------------------------
