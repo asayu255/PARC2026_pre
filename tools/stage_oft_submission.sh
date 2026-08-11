@@ -84,9 +84,16 @@ cat > "$REQ" <<'EOF'
 # transformers は checkpoint の保存時と同じ版に固定する（config.json の
 # transformers_version = 4.40.1）。4.5x では PreTrainedModel まわりが変わって
 # おり、trust_remote_code の modeling_prismatic.py が読めない。
-# torch は固定しない。採点機の CUDA に合う版を向こうに選ばせる。
-torch
-torchvision
+#
+# torch / torchvision / numpy / pillow は SmolVLA 版と同じ版に固定する。
+# あちらは実際に採点を通っており、採点環境でその wheel が取れることが
+# 分かっている。加えて parc-oft の torch も 2.10.0 で、そこで OFT が動く
+# ことを実測済みである。解決を pip に任せるより、両方で確認できている
+# 組み合わせを指定するほうが安全である。
+torch==2.10.0
+torchvision==0.25.0
+numpy==2.2.6
+pillow==12.3.0
 transformers==4.40.1
 tokenizers==0.19.1
 timm==0.9.10
@@ -95,10 +102,8 @@ safetensors
 huggingface_hub
 sentencepiece
 protobuf
-numpy
-pillow
-fastapi
-uvicorn
+fastapi>=0.68
+uvicorn>=0.15
 EOF
 
 # SmolVLA 版の requirements があるなら、サーバー本体（fastapi / uvicorn）と
