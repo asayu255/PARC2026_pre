@@ -277,3 +277,77 @@ def test_the_prismatic_shim_exposes_what_modeling_prismatic_imports():
     assert ACTION_DIM == 7
     assert NUM_ACTIONS_CHUNK == 8
     assert ACTION_PROPRIO_NORMALIZATION_TYPE == NormalizationType.BOUNDS_Q99
+
+
+# --- 提出物に同梱する構成ファイル -------------------------------------------
+#
+# 採点環境では環境変数を渡せないので、提出ごとの構成は parc_env が持つ。
+# ここが壊れると「A/B のつもりで同じものを 2 回提出する」事故になり、
+# しかも結果を見ても区別がつかない。
+
+
+def _load_env_from(tmp_path, text, monkeypatch, preset=None):
+    import importlib.util
+
+    for k, v in (preset or {}).items():
+        monkeypatch.setenv(k, v)
+    (tmp_path / "parc_env").write_text(text)
+
+    src = (_ROOT / "submission" / "policy_server.py").read_text()
+    start = src.index("def _load_submission_env")
+    end = src.index("_load_submission_env()", start)
+    ns = {"os": __import__("os"), "_HERE": tmp_path}
+    exec(src[start:end], ns)          # noqa: S102 - 関数 1 つだけを取り出して動かす
+    ns["_load_submission_env"]()
+
+
+def test_parc_env_sets_the_defaults(tmp_path, monkeypatch):
+    monkeypatch.delenv("PARC_ENSEMBLE", raising=False)
+    _load_env_from(tmp_path, "PARC_ENSEMBLE=1\nPARC_ENS_H=8\n", monkeypatch)
+
+    import os
+
+    assert os.environ["PARC_ENSEMBLE"] == "1"
+    assert os.environ["PARC_ENS_H"] == "8"
+
+
+def test_a_real_environment_variable_wins(tmp_path, monkeypatch):
+    """スイープが渡した値を提出物のファイルが握り潰してはいけない。"""
+    _load_env_from(
+        tmp_path, "PARC_ENSEMBLE=1\n", monkeypatch, preset={"PARC_ENSEMBLE": "0"}
+    )
+
+    import os
+
+    assert os.environ["PARC_ENSEMBLE"] == "0"
+
+
+def test_comments_and_blank_lines_are_skipped(tmp_path, monkeypatch):
+    monkeypatch.delenv("PARC_ENS_M", raising=False)
+    _load_env_from(tmp_path, "\n# 説明\nPARC_ENS_M=0.01  # 末尾コメント\n", monkeypatch)
+
+    import os
+
+    assert os.environ["PARC_ENS_M"] == "0.01"
+
+
+def test_keys_outside_the_parc_namespace_are_ignored(tmp_path, monkeypatch):
+    monkeypatch.delenv("LD_PRELOAD", raising=False)
+    _load_env_from(tmp_path, "LD_PRELOAD=/evil.so\n", monkeypatch)
+
+    import os
+
+    assert "LD_PRELOAD" not in os.environ
+
+
+def test_a_missing_file_is_not_an_error(tmp_path, monkeypatch):
+    import importlib.util
+    import os
+
+    src = (_ROOT / "submission" / "policy_server.py").read_text()
+    start = src.index("def _load_submission_env")
+    end = src.index("_load_submission_env()", start)
+    ns = {"os": os, "_HERE": tmp_path}
+    exec(src[start:end], ns)          # noqa: S102
+
+    ns["_load_submission_env"]()      # 例外が出ないこと

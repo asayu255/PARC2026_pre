@@ -74,6 +74,46 @@ class BasePolicy(ABC):
 
 _HERE = Path(__file__).resolve().parent
 
+
+def _load_submission_env() -> None:
+    """提出物に同梱した `parc_env` を環境変数として読む。
+
+    採点環境では環境変数を渡せないので、構成を変えたいと思うと
+    policy_server.py のコードを書き換えることになる。提出のたびに
+    コードが変わると、どの提出が何だったのかが追えなくなり、
+    A/B のつもりで別のものを比べる事故が起きる。
+
+    `KEY=VALUE` を 1 行ずつ書いた `parc_env` を置けば、それが既定になる。
+    **既に設定されている環境変数は上書きしない**ので、スイープで
+    `PARC_ENSEMBLE=0` を渡せばそちらが勝つ。ファイルが無ければ何もしない。
+
+    クラス属性は import 時に環境変数を読むので、ここは必ずクラス定義より
+    前に呼ぶ必要がある。
+    """
+    path = _HERE / "parc_env"
+    if not path.is_file():
+        return
+    applied = []
+    for raw in path.read_text().splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip().strip('"').strip("'")
+        if not key.startswith("PARC_"):
+            print(f"[MyPolicy] parc_env: PARC_ で始まらない {key!r} は無視する")
+            continue
+        if key in os.environ:
+            applied.append(f"{key}=(環境変数が優先: {os.environ[key]})")
+            continue
+        os.environ[key] = value
+        applied.append(f"{key}={value}")
+    if applied:
+        print(f"[MyPolicy] parc_env: {' '.join(applied)}")
+
+
+_load_submission_env()
+
 # 既定は同梱の model_weights。追加学習したモデルを評価するときは
 # PARC_WEIGHTS_DIR でマージ済みディレクトリを指せば、ファイルを
 # 入れ替えずに A/B が取れる。提出 zip では未設定なので影響しない。

@@ -136,6 +136,19 @@ if [ -f submission/requirements.txt ]; then
     done
 fi
 
+# --- 構成の宣言 --------------------------------------------------------------
+# 採点環境では環境変数を渡せないので、提出ごとの構成はこのファイルで持つ。
+# policy_server.py が起動時に読み、既に設定済みの環境変数は上書きしない。
+# コードを書き換えずに構成を振れるので、どの提出が何だったかが zip の中身を
+# 見るだけで分かる。
+if [ -n "${PARC_STAGE_ENV:-}" ]; then
+    printf '%s\n' ${PARC_STAGE_ENV//,/ } > "$DST/parc_env"
+    echo "[stage] parc_env:"
+    sed 's/^/    /' "$DST/parc_env"
+else
+    echo "[stage] parc_env なし（policy_server.py の既定＝本家構成で走る）"
+fi
+
 echo
 echo "[stage] --- 構成 ---"
 du -sh "$DST"
