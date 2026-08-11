@@ -87,9 +87,32 @@ echo "--- wheel のみで導入できた ---"
 
 echo
 echo "--- 2. validate_submission（HF キャッシュを隠して起動まで確認）---"
+# 動的スモーク（サーバーを起動して /health /reset /act を叩く）は
+# クライアント側に numpy / msgpack / requests を要求し、無ければ黙って
+# スキップして PASS を出す。それでは「起動を確認した」ことにならない。
+#
+# しかも危険な向きに壊れる。提出物の requirements から msgpack が抜けていると、
+# 同じ venv を使うスモークが道具不足でスキップされ、**msgpack が要るという
+# 事実を検出すべきテストが、msgpack が無いせいで動かない**。
+# 実際に OFT 版の初回ビルドがこれで PASS した（policy_server.py は
+# モジュール先頭で msgpack を import するので、採点では 0 点になっていた）。
+#
+# 検証用の道具として venv に入れておく。提出物の requirements とは別物で、
+# 提出物側に msgpack が要るかどうかは、この下のスキップ検出が判定する。
+"$VPY" -m pip install -q --only-binary=:all: msgpack requests >/dev/null 2>&1 || true
+
+SMOKELOG="$(mktemp)"
 HF_HOME="$HFDIR" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
-    "$VPY" validate_submission.py "$ZIP"
-rc=$?
+    "$VPY" validate_submission.py "$ZIP" 2>&1 | tee "$SMOKELOG"
+rc="${PIPESTATUS[0]}"
+
+if grep -q 'smoke.deps_missing\|smoke.skipped' "$SMOKELOG"; then
+    echo
+    echo "★ 動的スモークがスキップされた。サーバーの起動は確認できていない。"
+    echo "  この検証は PASS にしない。"
+    rc=1
+fi
+rm -f "$SMOKELOG"
 
 echo
 if [ "$rc" = "0" ]; then

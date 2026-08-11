@@ -121,6 +121,10 @@ sentencepiece
 protobuf
 fastapi>=0.68
 uvicorn>=0.15
+# policy_server.py はモジュール先頭で msgpack を import し、/act の本体を
+# msgpack.unpackb で復号する。これが無いとサーバーは起動すらしない。
+msgpack
+requests
 EOF
 
 # SmolVLA 版の requirements があるなら、サーバー本体（fastapi / uvicorn）と
