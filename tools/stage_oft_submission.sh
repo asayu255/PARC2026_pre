@@ -73,13 +73,20 @@ done
 # （config.json の transformers_version = 4.40.1）。それ以外は採点環境の
 # 解決に任せる。torch を固定しないのは、採点機の CUDA に合う版を向こうで
 # 選ばせるためで、こちらが指定して外すほうが危ない。
-cat > "$DST/requirements.txt" <<'EOF'
+REQ="$DST/requirements.txt"
+cat > "$REQ" <<'EOF'
 # OpenVLA-OFT+ (LIBERO-plus mix-SFT) を動かすための依存。
 # lerobot は使わないので同梱していない。
 #
-# transformers は checkpoint の保存時と同じ版に固定する。4.5x では
-# PreTrainedModel まわりが変わっており、trust_remote_code の
-# modeling_prismatic.py が読めない。
+# verify_clean_env.sh はまっさらな venv にこのファイルだけを入れて検証する。
+# つまりここに書いていないものは採点環境に存在しない。torch も含めて全部要る。
+#
+# transformers は checkpoint の保存時と同じ版に固定する（config.json の
+# transformers_version = 4.40.1）。4.5x では PreTrainedModel まわりが変わって
+# おり、trust_remote_code の modeling_prismatic.py が読めない。
+# torch は固定しない。採点機の CUDA に合う版を向こうに選ばせる。
+torch
+torchvision
 transformers==4.40.1
 tokenizers==0.19.1
 timm==0.9.10
@@ -93,6 +100,19 @@ pillow
 fastapi
 uvicorn
 EOF
+
+# SmolVLA 版の requirements があるなら、サーバー本体（fastapi / uvicorn）と
+# torch の指定を突き合わせる。あちらは実際に採点を通っている構成なので、
+# 版指定が食い違っていたら気づけるようにしておく。
+if [ -f submission/requirements.txt ]; then
+    echo
+    echo "[stage] --- SmolVLA 版との指定差（左: OFT / 右: SmolVLA）---"
+    for pkg in torch torchvision fastapi uvicorn numpy pillow; do
+        a="$(grep -iE "^${pkg}([=<>!~[]|$)" "$REQ" | head -1)"
+        b="$(grep -iE "^${pkg}([=<>!~[]|$)" submission/requirements.txt | head -1)"
+        printf '  %-12s %-24s %s\n' "$pkg" "${a:--}" "${b:--}"
+    done
+fi
 
 echo
 echo "[stage] --- 構成 ---"
