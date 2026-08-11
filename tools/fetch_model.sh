@@ -57,14 +57,29 @@ import os
 import sys
 
 from huggingface_hub import snapshot_download
+from huggingface_hub.errors import GatedRepoError
 
+repo = os.environ["REPO"]
 allow = os.environ["ALLOW"].split() or None
-path = snapshot_download(
-    repo_id=os.environ["REPO"],
-    local_dir=os.environ["DEST"],
-    allow_patterns=allow,
-    max_workers=8,
-)
+try:
+    path = snapshot_download(
+        repo_id=repo,
+        local_dir=os.environ["DEST"],
+        allow_patterns=allow,
+        max_workers=8,
+    )
+except GatedRepoError:
+    # google/paligemma-3b-pt-224 がこれ。π0 系の tokenizer は全部そこを見る。
+    # 巨大なトレースバックの下に埋もれると原因が読めないので、やることだけ出す。
+    print(
+        f"\n[fetch] {repo} は gated repo で、アクセス許可とログインが要る。\n"
+        f"[fetch]   1. https://huggingface.co/{repo} でライセンスに同意する\n"
+        f"[fetch]   2. {sys.executable.rsplit('/', 1)[0]}/huggingface-cli login\n"
+        f"[fetch]      （https://huggingface.co/settings/tokens の read トークン）\n"
+        f"[fetch]   3. このコマンドをもう一度実行する\n",
+        file=sys.stderr,
+    )
+    raise SystemExit(3)
 print(f"[fetch] done: {path}", file=sys.stderr)
 PYEOF
 
