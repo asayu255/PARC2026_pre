@@ -209,15 +209,26 @@ def _center_crop(hwc_uint8: np.ndarray, torch, crop_scale: float = CENTER_CROP_S
     return np.clip(out * 255.0 + 0.5, 0, 255).astype(np.uint8)
 
 
-def prepare_image(hwc_uint8: np.ndarray, torch, flip180: bool, center_crop: bool) -> np.ndarray:
-    """PARC から届く uint8 HWC を OFT の入力形式へ。"""
+def prepare_image(
+    hwc_uint8: np.ndarray, torch, flip180: bool, center_crop, crop_scale: float | None = None
+) -> np.ndarray:
+    """PARC から届く uint8 HWC を OFT の入力形式へ。
+
+    crop_scale を渡すとその値で切る（TTA 用）。省略時は既定の 0.9。
+    center_crop が偽ならクロップしない。
+    """
     img = hwc_uint8
     if flip180:
         img = img[::-1, ::-1]
     img = _resize_lanczos(np.ascontiguousarray(img), IMAGE_SIZE)
     if center_crop:
-        img = _center_crop(img, torch)
+        img = _center_crop(img, torch, crop_scale or CENTER_CROP_SCALE)
     return img
+
+
+#: TTA で使うクロップ倍率。既定の 0.9 を中心に前後へ振る。
+#: OFT は学習時にランダムクロップを使っているので、この範囲は分布内である。
+TTA_CROP_SCALES = (0.90, 0.95, 0.85, 1.00)
 
 
 def process_gripper(chunk: np.ndarray, binarize: bool = True) -> np.ndarray:
@@ -273,6 +284,7 @@ class OFTModel:
         unnorm_key: str | None = None,
         gripper_transform: bool = True,
         gripper_binarize: bool = True,
+        tta_views: int = 1,
     ) -> None:
         _install_vendor_path()
 
@@ -285,6 +297,7 @@ class OFTModel:
         self.center_crop = center_crop
         self.gripper_transform = gripper_transform
         self.gripper_binarize = gripper_binarize
+        self.tta_views = max(1, min(int(tta_views), len(TTA_CROP_SCALES)))
         self.device = torch.device(
             device or ("cuda:0" if torch.cuda.is_available() else "cpu")
         )
@@ -371,6 +384,7 @@ class OFTModel:
             f"[OFT] ready | device={self.device} | unnorm_key={self.unnorm_key}"
             f" | chunk={NUM_ACTIONS_CHUNK} | flip180={self.flip180}"
             f" | center_crop={self.center_crop} | gripper={grip}"
+            f" | tta={self.tta_views}"
         )
 
     # -- 準備 ---------------------------------------------------------------
@@ -427,17 +441,53 @@ class OFTModel:
         state: np.ndarray,
         instruction: str,
     ) -> np.ndarray:
-        """観測から action chunk を推論して shape (8, 7) を返す。"""
+        """観測から action chunk を推論して shape (8, 7) を返す。
+
+        tta_views > 1 のときはクロップ倍率を変えて複数回推論し、平均を取る。
+
+        temporal ensembling が時間方向の平均であるのに対し、これは空間方向の
+        平均である。L1 回帰ヘッドの OFT は出力が決定的なので、同じ画像を
+        何度推論しても同じ値しか出ない。入力側を振らないと平均する意味が無い。
+
+        平均は gripper 変換の**前**に取る。変換後は ±1 に二値化されており、
+        平均すると中間値になって二値化が壊れる。変換前の gripper は [0, 1] の
+        連続値なので、そこで平均してから sign を取れば多数決になる。
+        """
+        raw = np.stack(
+            [
+                self._predict_raw(image_main, image_wrist, state, instruction, scale)
+                for scale in TTA_CROP_SCALES[: self.tta_views]
+            ]
+        ).mean(axis=0)
+
+        chunk = raw.reshape(NUM_ACTIONS_CHUNK, ACTION_DIM).astype(np.float32)
+        if self.gripper_transform:
+            chunk = process_gripper(chunk, binarize=self.gripper_binarize)
+        return chunk
+
+    def _predict_raw(
+        self,
+        image_main: np.ndarray,
+        image_wrist: np.ndarray | None,
+        state: np.ndarray,
+        instruction: str,
+        crop_scale: float,
+    ) -> np.ndarray:
+        """1 視点ぶんの生の chunk（gripper 変換前）を返す。"""
         torch = self.torch
 
-        primary = prepare_image(image_main, torch, self.flip180, self.center_crop)
+        primary = prepare_image(
+            image_main, torch, self.flip180, self.center_crop, crop_scale
+        )
         prompt = self.PROMPT.format(task=(instruction or "").lower().strip())
 
         inputs = self.processor(prompt, self._to_pil(primary)).to(
             self.device, dtype=torch.bfloat16
         )
         if image_wrist is not None:
-            wrist = prepare_image(image_wrist, torch, self.flip180, self.center_crop)
+            wrist = prepare_image(
+                image_wrist, torch, self.flip180, self.center_crop, crop_scale
+            )
             wrist_inputs = self.processor(prompt, self._to_pil(wrist)).to(
                 self.device, dtype=torch.bfloat16
             )
@@ -467,10 +517,7 @@ class OFTModel:
         actions = out[0] if isinstance(out, tuple) else out
         if hasattr(actions, "detach"):
             actions = actions.detach().float().cpu().numpy()
-        chunk = np.asarray(actions, dtype=np.float32).reshape(NUM_ACTIONS_CHUNK, ACTION_DIM)
-        if self.gripper_transform:
-            chunk = process_gripper(chunk, binarize=self.gripper_binarize)
-        return chunk
+        return np.asarray(actions, dtype=np.float32).reshape(NUM_ACTIONS_CHUNK, ACTION_DIM)
 
     @staticmethod
     def _to_pil(hwc_uint8: np.ndarray):

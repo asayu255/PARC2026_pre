@@ -351,3 +351,40 @@ def test_a_missing_file_is_not_an_error(tmp_path, monkeypatch):
     exec(src[start:end], ns)          # noqa: S102
 
     ns["_load_submission_env"]()      # 例外が出ないこと
+
+
+# --- TTA（空間方向の平均）-----------------------------------------------------
+#
+# temporal ensembling は時間方向の平均で、L1 回帰ヘッドの OFT は出力が決定的
+# なので、同じ画像を何度推論しても同じ値しか出ない。入力側を振る必要がある。
+
+
+def test_tta_crop_scales_are_distinct_and_centred_on_the_default():
+    scales = oft_policy.TTA_CROP_SCALES
+
+    assert scales[0] == oft_policy.CENTER_CROP_SCALE   # 1 視点なら既定と同じ
+    assert len(set(scales)) == len(scales)
+
+
+def test_prepare_image_honours_an_explicit_crop_scale():
+    pytest.importorskip("PIL")
+    torch = pytest.importorskip("torch")
+    img = np.zeros((128, 128, 3), dtype=np.uint8)
+    img[56:72, 56:72] = 255
+
+    wide = oft_policy.prepare_image(img, torch, False, True, crop_scale=1.0)
+    tight = oft_policy.prepare_image(img, torch, False, True, crop_scale=0.25)
+
+    # きつく切るほど白い領域は大きく写る
+    assert (tight > 127).sum() > (wide > 127).sum()
+
+
+def test_prepare_image_without_crop_ignores_the_scale():
+    pytest.importorskip("PIL")
+    torch = pytest.importorskip("torch")
+    img = np.random.default_rng(4).integers(0, 256, (128, 128, 3), dtype=np.uint8)
+
+    a = oft_policy.prepare_image(img, torch, False, False, crop_scale=0.5)
+    b = oft_policy.prepare_image(img, torch, False, False)
+
+    assert np.array_equal(a, b)

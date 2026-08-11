@@ -235,6 +235,24 @@ class MyPolicy(BasePolicy):
     #: A/B 用に PARC_FLIP180=0 で無効化できる。既定（未設定）は有効。
     FLIP_IMAGES_180 = os.environ.get("PARC_FLIP180", "1") != "0"
 
+    #: 環境へ渡す直前に並進 / 回転の振幅へ掛ける係数。既定 1.0 で無効。
+    #:
+    #: 狙いは 1 mm 衝突ルールである。採点でゴールに到達した 3 本は、到達しながら
+    #: 非対象物体への接触で失格している（§22.3.1）。接触の多くは「1 step で
+    #: 踏み込みすぎる」ことで起きるので、刻みを細かくすれば貫入量が減る。
+    #:
+    #: 予算はある。採点 5 回目のエピソードは 96 / 119 / 126 step で終わっており、
+    #: 上限は 300。振幅を半分にしても step 数は 300 に収まる見込みがある。
+    #:
+    #: 開ループなら破綻する操作だが、ensembling は毎ステップ再推論するので、
+    #: 遅くなった分はモデルが観測し直して補正する。
+    #:
+    #: **gripper (次元 6) には掛けない。** OFT の gripper は ±1 に二値化されて
+    #: おり、0.6 倍すると「半分閉じる」という存在しない指令になる。
+    ACT_SCALE = _env_float("PARC_ACT_SCALE", 1.0)
+    #: 回転だけ別係数にしたい場合。0 以下なら ACT_SCALE に従う。
+    ACT_SCALE_ROT = _env_float("PARC_ACT_SCALE_ROT", 0.0)
+
     #: config.json の chunk_size / n_action_steps に一致させる
     ACTION_CHUNK_SIZE = 50
 
@@ -560,6 +578,7 @@ class MyPolicy(BasePolicy):
             unnorm_key=os.environ.get("PARC_OFT_UNNORM") or None,
             gripper_transform=gripper != "off",
             gripper_binarize=gripper != "linear",
+            tta_views=_env_int("PARC_OFT_TTA", 1, minimum=1),
         )
         print(
             f"[MyPolicy] weights: {_WEIGHTS_DIR}"
@@ -568,6 +587,8 @@ class MyPolicy(BasePolicy):
             f" | state_dim={self.state_dim} | chunk={self.ACTION_CHUNK_SIZE}"
             f" | flip180={self.FLIP_IMAGES_180}"
             f"\n[MyPolicy]   ensemble={self._ensemble_desc()}"
+            f"\n[MyPolicy]   act_scale={self.ACT_SCALE:g}"
+            f" rot={(self.ACT_SCALE_ROT if self.ACT_SCALE_ROT > 0 else self.ACT_SCALE):g}"
         )
         return self.oft
 
@@ -983,15 +1004,29 @@ class MyPolicy(BasePolicy):
         if _DEBUG_DIR and not self._warming:
             self._trace_step(obs)
         if self.TEMPORAL_ENSEMBLE:
-            action = self._sanitize(self._ensembled_action(obs))
+            action = self._ensembled_action(obs)
         else:
             if not self._queue:
                 chunk = self._fresh_chunk(obs)
                 self._queue.extend(chunk[: max(1, self.N_ACTION_EXEC)])
-            action = self._sanitize(self._queue.popleft())
+            action = self._queue.popleft()
+        action = self._sanitize(self._scale_action(action))
         if not self._warming:
             self._record_latency(time.perf_counter() - t0)
         return action
+
+    def _scale_action(self, action: np.ndarray) -> np.ndarray:
+        """並進 / 回転の振幅を落とす。gripper は触らない。
+
+        既定（両方 1.0）では入力をそのまま返すので、コピーも発生しない。
+        """
+        rot = self.ACT_SCALE_ROT if self.ACT_SCALE_ROT > 0 else self.ACT_SCALE
+        if self.ACT_SCALE == 1.0 and rot == 1.0:
+            return action
+        a = np.array(action, dtype=np.float32, copy=True).reshape(7)
+        a[:3] *= self.ACT_SCALE
+        a[3:6] *= rot
+        return a
 
     def _fresh_chunk(self, obs: dict[str, np.ndarray]) -> np.ndarray:
         """_predict_chunk() を呼び、shape (N, 7) float32 として検証して返す。"""
