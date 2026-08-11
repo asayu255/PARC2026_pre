@@ -23,6 +23,21 @@ cd "$ROOT"
 # 何ヶ月も前のラウンドの成績を表示し、それを現在の結果として読みかけた。
 # 2 回やっている。走っているものがあるならそれを見るのが正しい。
 detect_prefix() {
+    # いちばん確実なのは results/ である。スイープは条件ごとに
+    # results/<接頭辞>_<ラベル>/ を作り直すので、最も新しいものが
+    # 走っているラウンドを指す。
+    #
+    # ログで判定すると外れることがある。同じラウンドを二重起動すると、
+    # 2 回目が `> logs/sweep_<接頭辞>.log` で**走行中のログを上書きし**、
+    # 中止メッセージだけを残す。実際にそれで「走っていない」と誤判定した。
+    local newest_result
+    newest_result="$(ls -td results/*_*/ 2>/dev/null | head -1)"
+    if [ -n "$newest_result" ]; then
+        newest_result="$(basename "${newest_result%/}")"
+        printf '%s\n' "${newest_result%_*}"
+        return 0
+    fi
+
     # スイープ本体は「出力 : results/<接頭辞>_<ラベル>/」を冒頭に出す。
     #
     # ポートを取れずに即中止したログは飛ばす。中止されたラウンドのほうが
