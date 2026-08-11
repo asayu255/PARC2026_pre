@@ -11,16 +11,24 @@
 set -euo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-SRC="submission"
-OUT="submission.zip"
+# 既定は SmolVLA 版。OpenVLA-OFT 版は tools/stage_oft_submission.sh が
+# submission_oft/ を作るので、そちらを指して同じ手順で zip にする。
+SRC="${PARC_SUBMISSION_SRC:-submission}"
+OUT="${PARC_SUBMISSION_ZIP:-submission.zip}"
 DRY=0
 [ "${1:-}" = "--dry-run" ] && DRY=1
 
 test -f "$SRC/policy_server.py"  || { echo "ERROR: $SRC/policy_server.py が無い" >&2; exit 1; }
-# requirements.txt と vendor/ は tools/vendor_lerobot.sh が作る生成物であり
-# git 管理外である（管理下に置くと再生成のたびに pull が衝突する）。
-if [ ! -f "$SRC/requirements.txt" ] || [ ! -d "$SRC/vendor" ]; then
-    echo "ERROR: $SRC/requirements.txt または $SRC/vendor が無い。" >&2
+if [ ! -f "$SRC/requirements.txt" ]; then
+    echo "ERROR: $SRC/requirements.txt が無い。" >&2
+    echo "       SmolVLA 版: bash tools/vendor_lerobot.sh" >&2
+    echo "       OFT 版:     bash tools/stage_oft_submission.sh" >&2
+    exit 1
+fi
+# vendor/ は lerobot を同梱するための生成物で、SmolVLA 版にしか無い。
+# OFT は lerobot を使わず、依存はすべて wheel があるので pip に任せる。
+if [ ! -d "$SRC/vendor" ] && [ ! -d "$SRC/vendor_oft" ]; then
+    echo "ERROR: $SRC/vendor も $SRC/vendor_oft も無い。" >&2
     echo "       先に実行すること: bash tools/vendor_lerobot.sh" >&2
     exit 1
 fi
@@ -58,7 +66,11 @@ echo
 echo "== zip を作成 =="
 rm -f "$OUT"
 # $SRC の「中身」を zip 直下へ入れる（submission/ という階層を作らない）
-(cd "$SRC" && zip -q -r "../$OUT" .)
+#
+# 圧縮率は PARC_ZIP_LEVEL で変えられる。safetensors は既に密で deflate が
+# ほとんど効かないため、15 GB の OFT 版では -1（最速）にすると数十分が
+# 数分になる。上限は 20 GB あり、削るべきは容量ではなく時間である。
+(cd "$SRC" && zip -q -r "${PARC_ZIP_LEVEL:--6}" "../$OUT" .)
 echo "$OUT: $(du -h "$OUT" | cut -f1)"
 echo
 echo "== zip 直下の確認 =="
