@@ -40,6 +40,12 @@ echo "[stage] dest   : $DST"
 # 掴んでいる、zip が走っている等）。原因を出さずに続けると、古い
 # policy_server.py が入った zip ができる。
 rm -rf "$DST" 2>/dev/null || true
+# NFS の silly-rename (.nfsXXXX) は、開いていたプロセスが死んだあとも
+# 残ることがある。ハードリンクなので消しても ~/parc_models の重みは無傷。
+if [ -e "$DST" ]; then
+    find "$DST" -name '.nfs*' -delete 2>/dev/null || true
+    rm -rf "$DST" 2>/dev/null || true
+fi
 if [ -e "$DST" ]; then
     echo "ERROR: $DST を消せない。中身を掴んでいるプロセスがある。" >&2
     echo "--- 残っているもの ---" >&2
@@ -47,6 +53,8 @@ if [ -e "$DST" ]; then
     echo "--- 掴んでいるプロセス（fuser があれば）---" >&2
     command -v fuser >/dev/null 2>&1 && fuser -vm "$DST" 2>&1 | head -10 >&2
     echo "  ポリシーサーバーが動いていないか確認すること: pkill -f policy_server.py" >&2
+    echo "  待てないなら別ディレクトリへ逃げられる:" >&2
+    echo "    PARC_OFT_STAGE=${DST}2 bash tools/stage_oft_submission.sh" >&2
     exit 1
 fi
 mkdir -p "$DST/model_weights"
