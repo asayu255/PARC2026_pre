@@ -2,7 +2,7 @@
 #
 # 走行中のスイープの進捗をまとめて出す。読み取り専用で、評価には触らない。
 #
-#   bash tools/sweep_status.sh             # results/ens_*/ のラウンド（50 ep）
+#   bash tools/sweep_status.sh             # 走行中のラウンドを自動判定
 #   bash tools/sweep_status.sh t4 10       # results/t4_*/ のラウンド（10 ep）
 #   watch -n 60 bash tools/sweep_status.sh t4 10   # 1 分ごとに更新
 #
@@ -17,7 +17,36 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-PREFIX="${1:-ens}"
+# 接頭辞を省略したら、**いま走っているスイープ**のものを使う。
+#
+# 既定を "ens" に固定していたせいで、別ラウンドを回している最中に
+# 何ヶ月も前のラウンドの成績を表示し、それを現在の結果として読みかけた。
+# 2 回やっている。走っているものがあるならそれを見るのが正しい。
+detect_prefix() {
+    # スイープ本体は「出力 : results/<接頭辞>_<ラベル>/」を冒頭に出す。
+    #
+    # ポートを取れずに即中止したログは飛ばす。中止されたラウンドのほうが
+    # 新しいことは普通にあり（走行中のものを追い越して起動しようとした結果
+    # 落ちるので）、それを拾うと走っていないラウンドを見せてしまう。
+    local log
+    for log in $(ls -t logs/sweep_*.log 2>/dev/null); do
+        grep -q '既に別のスイープが動いている' "$log" && continue
+        sed -n 's#.*results/\([A-Za-z0-9_.-]*\)_<ラベル>/.*#\1#p' "$log" | head -1
+        return 0
+    done
+    return 1
+}
+
+PREFIX="${1:-}"
+if [ -z "$PREFIX" ]; then
+    PREFIX="$(detect_prefix || true)"
+    if [ -n "$PREFIX" ]; then
+        echo "[status] 接頭辞を最新のスイープログから判定: $PREFIX"
+    else
+        PREFIX="ens"
+        echo "[status] スイープログが無いので既定の接頭辞を使う: $PREFIX"
+    fi
+fi
 EPISODES="${2:-${PARC_SWEEP_EPISODES:-50}}"
 
 echo "=== プロセス ==============================================="
