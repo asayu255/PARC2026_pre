@@ -192,6 +192,12 @@ lerobot 0.4.4 に `pi` extra は存在せず、差し替え版の入手先も書
   全条件が同じ設定で走る事故が実際に起きた（§23.3）
 - **提出前は必ず `tools/verify_clean_env.sh` を通す。**
   作業環境で `validate_submission.py` が PASS しても採点は 0 点だった（§1）
+- **「スキップされた検査」を合格と読まない。** OFT 版の初回ビルドは
+  `requirements.txt` から `msgpack` が抜けていた（`policy_server.py` は
+  モジュール先頭で import する）。ところが動的スモークもクライアント側で
+  msgpack を要るため、**欠落を検出すべきテストが、その欠落のせいで
+  スキップされて PASS になった**。いまは `smoke.deps_missing` を見つけたら
+  FAIL にしてある。検査が動かなかったことと、動いて通ったことは違う
 
 ---
 
