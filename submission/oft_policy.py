@@ -192,7 +192,9 @@ def _center_crop(hwc_uint8: np.ndarray, torch, crop_scale: float = CENTER_CROP_S
     side = float(np.sqrt(crop_scale))
     lo, hi = (1.0 - side) / 2.0, (1.0 - side) / 2.0 + side
 
-    x = torch.from_numpy(np.ascontiguousarray(hwc_uint8)).permute(2, 0, 1)[None].float() / 255.0
+    # PIL 由来の配列は read-only なので copy してから渡す（torch が警告を出す）
+    x = torch.from_numpy(np.ascontiguousarray(hwc_uint8).copy())
+    x = x.permute(2, 0, 1)[None].float() / 255.0
 
     # 正規化座標 -> 画素 -> grid_sample の [-1, 1]
     ys = torch.linspace(lo * (h - 1), hi * (h - 1), h) * (2.0 / (h - 1)) - 1.0
@@ -260,17 +262,45 @@ class OFTModel:
         )
 
         print(f"[OFT] weights: {self.weights_dir}")
-        self.processor = AutoProcessor.from_pretrained(
-            str(self.weights_dir), trust_remote_code=True, local_files_only=True
+        self.processor = self._timed(
+            "processor",
+            lambda: AutoProcessor.from_pretrained(
+                str(self.weights_dir), trust_remote_code=True, local_files_only=True
+            ),
         )
-        self.vla = AutoModelForVision2Seq.from_pretrained(
-            str(self.weights_dir),
+
+        # サーバー起動から /health が 200 を返すまでの制限は 120 秒である。
+        # 15 GB を CPU 上に組んでから GPU へコピーすると、その往復だけで
+        # 予算を使い切る。device_map で shard を直接 GPU へ流すと CPU 常駐と
+        # コピーが消える。accelerate が要るが parc-oft には入っている。
+        common = dict(
             torch_dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
             trust_remote_code=True,
             local_files_only=True,
         )
-        self.vla = self.vla.eval().to(self.device)
+        use_map = self.device.type == "cuda" and env_flag("PARC_OFT_DEVICE_MAP", True)
+        if use_map:
+            try:
+                self.vla = self._timed(
+                    "model (device_map)",
+                    lambda: AutoModelForVision2Seq.from_pretrained(
+                        str(self.weights_dir),
+                        device_map={"": self.device.index or 0},
+                        **common,
+                    ),
+                )
+            except Exception as exc:
+                print(f"[OFT] device_map で載らなかったので CPU 経由に落とす: {exc}")
+                use_map = False
+        if not use_map:
+            self.vla = self._timed(
+                "model (cpu->gpu)",
+                lambda: AutoModelForVision2Seq.from_pretrained(
+                    str(self.weights_dir), **common
+                ).to(self.device),
+            )
+        self.vla = self.vla.eval()
 
         # 画像 2 枚（主カメラ + 手首）を受けられるようにする。
         if hasattr(self.vla, "vision_backbone") and hasattr(
@@ -293,12 +323,18 @@ class OFTModel:
         self.unnorm_key = self._resolve_unnorm_key(unnorm_key)
 
         L1RegressionActionHead, ProprioProjector = _build_head_classes()
-        self.action_head = _load_checkpoint_into(
-            L1RegressionActionHead(), self._find_ckpt("action_head"), torch
-        ).to(self.device, dtype=torch.bfloat16).eval()
-        self.proprio_projector = _load_checkpoint_into(
-            ProprioProjector(), self._find_ckpt("proprio_projector"), torch
-        ).to(self.device, dtype=torch.bfloat16).eval()
+        self.action_head = self._timed(
+            "action_head",
+            lambda: _load_checkpoint_into(
+                L1RegressionActionHead(), self._find_ckpt("action_head"), torch
+            ).to(self.device, dtype=torch.bfloat16).eval(),
+        )
+        self.proprio_projector = self._timed(
+            "proprio_projector",
+            lambda: _load_checkpoint_into(
+                ProprioProjector(), self._find_ckpt("proprio_projector"), torch
+            ).to(self.device, dtype=torch.bfloat16).eval(),
+        )
 
         print(
             f"[OFT] ready | device={self.device} | unnorm_key={self.unnorm_key}"
@@ -307,6 +343,16 @@ class OFTModel:
         )
 
     # -- 準備 ---------------------------------------------------------------
+
+    @staticmethod
+    def _timed(label: str, fn):
+        """段階ごとの所要時間を出す。120 秒の起動制限に対する内訳が要る。"""
+        import time
+
+        t = time.perf_counter()
+        out = fn()
+        print(f"[OFT] {label}: {time.perf_counter() - t:.1f}s")
+        return out
 
     def _find_ckpt(self, prefix: str) -> Path:
         matches = sorted(self.weights_dir.glob(f"{prefix}--*_checkpoint.pt"))
@@ -383,6 +429,10 @@ class OFTModel:
                 action_head=self.action_head,
                 use_film=False,
             )
+        # action head を渡した経路では torch テンソル（しかも GPU 上）が返る。
+        # 本家の numpy 前提とは違うので、こちらで受ける。
+        if hasattr(actions, "detach"):
+            actions = actions.detach().float().cpu().numpy()
         return np.asarray(actions, dtype=np.float32).reshape(NUM_ACTIONS_CHUNK, ACTION_DIM)
 
     @staticmethod
