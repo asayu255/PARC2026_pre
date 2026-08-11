@@ -220,6 +220,30 @@ def prepare_image(hwc_uint8: np.ndarray, torch, flip180: bool, center_crop: bool
     return img
 
 
+def process_gripper(chunk: np.ndarray, binarize: bool = True) -> np.ndarray:
+    """gripper 次元をモデル出力から環境の規約へ直す。
+
+    本家 run_libero_eval は env.step の直前で process_action() を通しており、
+    それが 2 段階になっている（experiments/robot/robot_utils.py）。
+
+      1. normalize_gripper_action: RLDS のデータローダは gripper だけ [0, 1] に
+         標準化しているので、他の次元と同じ [-1, +1] へ戻す。
+         y = 2x - 1。binarize=True なら sign を取る
+      2. invert_gripper_action: そのデータローダは 0=閉じる / 1=開く で
+         揃えているが、環境は -1=開く / +1=閉じる なので符号を反転する
+
+    これを入れないと**グリッパーが常に逆に動く**。実測でもモデル出力の
+    gripper 次元は 1.04 付近（統計は q01=0.0 / q99=1.0）で、そのまま渡すと
+    clip されて +1（＝閉じる）になり、開くべき場面で閉じる。
+    """
+    out = np.array(chunk, dtype=np.float32, copy=True)
+    g = 2.0 * out[..., -1] - 1.0
+    if binarize:
+        g = np.sign(g)
+    out[..., -1] = -g
+    return out
+
+
 def normalize_proprio(state: np.ndarray, stats: dict) -> np.ndarray:
     """[q01, q99] -> [-1, 1] にして clip する（本家 normalize_proprio と同一）。"""
     low = np.asarray(stats["q01"], dtype=np.float64)
@@ -247,6 +271,8 @@ class OFTModel:
         flip180: bool = True,
         center_crop: bool = True,
         unnorm_key: str | None = None,
+        gripper_transform: bool = True,
+        gripper_binarize: bool = True,
     ) -> None:
         _install_vendor_path()
 
@@ -257,6 +283,8 @@ class OFTModel:
         self.weights_dir = Path(weights_dir)
         self.flip180 = flip180
         self.center_crop = center_crop
+        self.gripper_transform = gripper_transform
+        self.gripper_binarize = gripper_binarize
         self.device = torch.device(
             device or ("cuda:0" if torch.cuda.is_available() else "cpu")
         )
@@ -336,10 +364,13 @@ class OFTModel:
             ).to(self.device, dtype=torch.bfloat16).eval(),
         )
 
+        grip = "off"
+        if self.gripper_transform:
+            grip = "binarize" if self.gripper_binarize else "linear"
         print(
             f"[OFT] ready | device={self.device} | unnorm_key={self.unnorm_key}"
             f" | chunk={NUM_ACTIONS_CHUNK} | flip180={self.flip180}"
-            f" | center_crop={self.center_crop}"
+            f" | center_crop={self.center_crop} | gripper={grip}"
         )
 
     # -- 準備 ---------------------------------------------------------------
@@ -436,7 +467,10 @@ class OFTModel:
         actions = out[0] if isinstance(out, tuple) else out
         if hasattr(actions, "detach"):
             actions = actions.detach().float().cpu().numpy()
-        return np.asarray(actions, dtype=np.float32).reshape(NUM_ACTIONS_CHUNK, ACTION_DIM)
+        chunk = np.asarray(actions, dtype=np.float32).reshape(NUM_ACTIONS_CHUNK, ACTION_DIM)
+        if self.gripper_transform:
+            chunk = process_gripper(chunk, binarize=self.gripper_binarize)
+        return chunk
 
     @staticmethod
     def _to_pil(hwc_uint8: np.ndarray):

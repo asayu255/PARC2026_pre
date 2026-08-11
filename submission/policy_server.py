@@ -339,6 +339,7 @@ class MyPolicy(BasePolicy):
         self._lat_n = 0
         self._lat_slow = 0
         self.policy_type = "smolvla"   # _load_model が config から上書きする
+        self.oft = None                # OpenVLA-OFT のときだけ入る
         self.model = self._load_model()
         self._warmup()
 
@@ -359,6 +360,14 @@ class MyPolicy(BasePolicy):
                 f"\n[MyPolicy]   ensemble={self._ensemble_desc()}"
             )
             return None
+
+        # OpenVLA-OFT は lerobot をまったく使わない（使えない。checkpoint は
+        # transformers 4.40.1 前提で、lerobot 0.4.4 は SmolVLA 用に 4.57.1 以上を
+        # 要求する）。lerobot を sys.path へ入れる前に分岐する。
+        import oft_policy
+
+        if oft_policy.is_oft_checkpoint(_WEIGHTS_DIR):
+            return self._load_oft_model(oft_policy)
 
         # 同梱した lerobot を優先する。site-packages に別バージョンが
         # 入っていても、こちらが先に解決される。
@@ -465,6 +474,41 @@ class MyPolicy(BasePolicy):
             f" | num_steps={getattr(model.config, 'num_steps', '?')}"
         )
         return model
+
+    def _load_oft_model(self, oft_policy):
+        """OpenVLA-OFT+ を読み込む。lerobot 側の経路とは完全に別。
+
+        SmolVLA 側で config から導いていたもの（画像キー、state 次元、
+        processor）は OFT では固定である。LIBERO の観測は主カメラ + 手首の
+        2 枚で、state は eef_pos(3) + axis_angle(3) + gripper_qpos(2) の 8 次元。
+        """
+        import torch
+
+        self.torch = torch
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.policy_type = "openvla-oft"
+        self.state_dim = 8
+        self.ACTION_CHUNK_SIZE = oft_policy.NUM_ACTIONS_CHUNK
+
+        gripper = os.environ.get("PARC_OFT_GRIPPER", "binarize")
+        self.oft = oft_policy.OFTModel(
+            _WEIGHTS_DIR,
+            device=str(self.device),
+            flip180=self.FLIP_IMAGES_180,
+            center_crop=oft_policy.env_flag("PARC_OFT_CENTER_CROP", True),
+            unnorm_key=os.environ.get("PARC_OFT_UNNORM") or None,
+            gripper_transform=gripper != "off",
+            gripper_binarize=gripper != "linear",
+        )
+        print(
+            f"[MyPolicy] weights: {_WEIGHTS_DIR}"
+            f"{' (PARC_WEIGHTS_DIR)' if os.environ.get('PARC_WEIGHTS_DIR') else ''}"
+            f"\n[MyPolicy] {self.policy_type} ready | device={self.device}"
+            f" | state_dim={self.state_dim} | chunk={self.ACTION_CHUNK_SIZE}"
+            f" | flip180={self.FLIP_IMAGES_180}"
+            f"\n[MyPolicy]   ensemble={self._ensemble_desc()}"
+        )
+        return self.oft
 
     @staticmethod
     def _ensure_siglip_check() -> None:
@@ -666,6 +710,16 @@ class MyPolicy(BasePolicy):
         if self.model is None:
             return np.zeros((self.ACTION_CHUNK_SIZE, 7), dtype=np.float32)
 
+        if self.oft is not None:
+            # OFT は uint8 HWC をそのまま受ける（180 度回転・224 へのリサイズ・
+            # center crop は OFTModel 側で本家と同じ順序で行う）。
+            return self.oft.predict_chunk(
+                obs["agentview_image"],
+                obs["robot0_eye_in_hand_image"],
+                self._state_array(obs),
+                self.instruction,
+            )
+
         torch = self.torch
         batch = {
             self.key_main: self._to_image(obs["agentview_image"]),
@@ -827,7 +881,11 @@ class MyPolicy(BasePolicy):
         lerobot の pad_vector と同じ扱いで、正規化は統計の次元で走るため、
         こちらが短い配列を渡すと形が合わずに落ちる。
         """
-        torch = self.torch
+        state = self._state_array(obs)
+        return self.torch.from_numpy(state).unsqueeze(0).to(self.device)
+
+    def _state_array(self, obs: dict[str, np.ndarray]) -> np.ndarray:
+        """observation.state を numpy で組み立てる（torch を挟まない経路用）。"""
         parts = [
             np.asarray(obs["robot0_eef_pos"], dtype=np.float32).reshape(3),
             self._quat2axisangle(obs["robot0_eef_quat"]),
@@ -839,7 +897,7 @@ class MyPolicy(BasePolicy):
         state = np.concatenate(parts).astype(np.float32)
         if state.size < self.state_dim:
             state = np.pad(state, (0, self.state_dim - state.size))
-        return torch.from_numpy(state).unsqueeze(0).to(self.device)
+        return state
 
     @staticmethod
     def _quat2axisangle(quat: np.ndarray) -> np.ndarray:
@@ -960,7 +1018,7 @@ class MyPolicy(BasePolicy):
 
         self.instruction = instruction
         self._clear_episode_state()
-        if self.model is not None:
+        if self.model is not None and hasattr(self.model, "reset"):
             self.model.reset()   # SmolVLA 内部の action queue もクリアする
 
     @staticmethod

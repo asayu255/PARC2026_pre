@@ -156,6 +156,59 @@ def test_flip180_is_applied_before_resize():
     assert out[:16, :16].mean() < out[-16:, -16:].mean()
 
 
+# --- gripper の変換 ---------------------------------------------------------
+#
+# 本家 process_action は env.step の直前で
+#   normalize_gripper_action(binarize=True) -> invert_gripper_action
+# を通す。合成すると -sign(2g - 1) である。ここを落とすとグリッパーが
+# 常に逆に動き、しかも例外は出ない。
+
+
+def test_gripper_open_becomes_minus_one():
+    """モデルは開くとき 1 付近を出す（統計は q99=1.0）。環境は -1 が開く。"""
+    chunk = np.zeros((8, 7), dtype=np.float32)
+    chunk[:, -1] = 1.04                       # 実測で出た値
+
+    out = oft_policy.process_gripper(chunk)
+
+    assert np.all(out[:, -1] == -1.0)
+
+
+def test_gripper_closed_becomes_plus_one():
+    chunk = np.zeros((8, 7), dtype=np.float32)
+    chunk[:, -1] = 0.0                        # q01 側
+
+    out = oft_policy.process_gripper(chunk)
+
+    assert np.all(out[:, -1] == 1.0)
+
+
+def test_gripper_without_binarize_is_the_linear_map():
+    chunk = np.zeros((1, 7), dtype=np.float32)
+    chunk[0, -1] = 0.25
+
+    out = oft_policy.process_gripper(chunk, binarize=False)
+
+    assert out[0, -1] == pytest.approx(-(2 * 0.25 - 1))   # = +0.5
+
+
+def test_gripper_transform_leaves_the_other_dims_untouched():
+    rng = np.random.default_rng(3)
+    chunk = rng.normal(size=(8, 7)).astype(np.float32)
+
+    out = oft_policy.process_gripper(chunk)
+
+    assert np.array_equal(out[:, :6], chunk[:, :6])
+
+
+def test_gripper_transform_does_not_mutate_its_input():
+    chunk = np.ones((2, 7), dtype=np.float32)
+
+    oft_policy.process_gripper(chunk)
+
+    assert np.all(chunk[:, -1] == 1.0)
+
+
 # --- 状態の正規化 -----------------------------------------------------------
 
 
