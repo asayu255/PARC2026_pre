@@ -73,12 +73,14 @@ pgrep -af 'policy_server\.py' 2>/dev/null | sed 's/^/  /'
 
 echo
 echo "=== いまどの条件か ========================================="
-SWEEPLOG="$(ls -t logs/sweep_${PREFIX}_*.log 2>/dev/null | head -1)"
+# 名前は 2 通りある。nohup の出力先を自分で決めると sweep_<接頭辞>.log に
+# なり、スクリプトが自分で作ると sweep_<接頭辞>_<pid>.log になる。両方見る。
+SWEEPLOG="$(ls -t logs/sweep_${PREFIX}_*.log logs/sweep_${PREFIX}.log 2>/dev/null | head -1)"
 if [ -n "$SWEEPLOG" ]; then
     echo "  ログ: $SWEEPLOG"
     grep -E '^=== |^\[sweep\]' "$SWEEPLOG" | tail -6 | sed 's/^/  /'
 else
-    echo "  logs/sweep_${PREFIX}_*.log が無い"
+    echo "  logs/sweep_${PREFIX}{,_*}.log が無い"
 fi
 
 echo
