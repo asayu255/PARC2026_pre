@@ -31,7 +31,24 @@ SRC_W="${SRC_W/#\~/$HOME}"
 echo "[stage] weights: $SRC_W"
 echo "[stage] dest   : $DST"
 
-rm -rf "$DST"
+# 作り直す前に必ず消す。前回の残骸が混ざった zip は、中身を見ないと
+# 気づけないまま提出されうる。
+#
+# rm -rf が「ディレクトリは空ではありません」で失敗することがある。
+# NFS 上でそのファイルを開いているプロセスがあると、削除の代わりに
+# .nfsXXXX へ silly-rename されて残るためである（サーバーがまだ重みを
+# 掴んでいる、zip が走っている等）。原因を出さずに続けると、古い
+# policy_server.py が入った zip ができる。
+rm -rf "$DST" 2>/dev/null || true
+if [ -e "$DST" ]; then
+    echo "ERROR: $DST を消せない。中身を掴んでいるプロセスがある。" >&2
+    echo "--- 残っているもの ---" >&2
+    find "$DST" -maxdepth 2 | head -20 >&2
+    echo "--- 掴んでいるプロセス（fuser があれば）---" >&2
+    command -v fuser >/dev/null 2>&1 && fuser -vm "$DST" 2>&1 | head -10 >&2
+    echo "  ポリシーサーバーが動いていないか確認すること: pkill -f policy_server.py" >&2
+    exit 1
+fi
 mkdir -p "$DST/model_weights"
 
 # --- サーバー本体 ------------------------------------------------------------
