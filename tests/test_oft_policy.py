@@ -116,16 +116,33 @@ def test_center_crop_at_scale_one_is_the_identity():
     assert np.array_equal(out, img)
 
 
-def test_center_crop_keeps_shape_and_zooms_in():
+def test_center_crop_zooms_in_by_the_square_root_of_the_scale():
+    """中央だけ白い画像を拡大すると、白い領域が 1/sqrt(crop_scale) 倍になる。
+
+    本番の 0.9 だと倍率が 1.054 で、16 px の正方形は 16.9 px にしかならず
+    閾値の丸めに埋もれる。倍率が明確な 0.25（= 2 倍）で見る。
+    """
     torch = pytest.importorskip("torch")
-    # 中央だけ白い画像。切り取って引き伸ばすので白い領域は広がるはず
+    img = np.zeros((64, 64, 3), dtype=np.uint8)
+    img[24:40, 24:40] = 255                      # 16 px 四方、中央
+
+    out = oft_policy._center_crop(img, torch, crop_scale=0.25)
+
+    assert out.shape == img.shape
+    white_cols = (out[:, :, 0] > 127).any(axis=0).sum()
+    assert 28 <= white_cols <= 32                # 16 px が概ね 2 倍
+
+
+def test_center_crop_keeps_the_bright_region_centred():
+    torch = pytest.importorskip("torch")
     img = np.zeros((64, 64, 3), dtype=np.uint8)
     img[24:40, 24:40] = 255
 
     out = oft_policy._center_crop(img, torch, crop_scale=0.9)
 
     assert out.shape == img.shape
-    assert (out > 127).sum() > (img > 127).sum()
+    rows = np.nonzero((out[:, :, 0] > 127).any(axis=1))[0]
+    assert abs((rows[0] + rows[-1]) / 2 - 31.5) < 1.0
 
 
 def test_flip180_is_applied_before_resize():
@@ -162,7 +179,8 @@ def test_normalize_proprio_leaves_masked_out_dims_alone():
 
     out = oft_policy.normalize_proprio(np.array([0.0, 7.0]), stats)
 
-    assert out[0] == pytest.approx(0.0)
+    # 分母の +1e-8（本家と同じ）で厳密な 0 にはならない
+    assert out[0] == pytest.approx(0.0, abs=1e-6)
     assert out[1] == pytest.approx(7.0)
 
 
