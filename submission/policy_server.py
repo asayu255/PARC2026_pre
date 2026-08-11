@@ -439,11 +439,17 @@ class MyPolicy(BasePolicy):
 
         self._resolve_image_keys()
         self.state_dim = self._detect_state_dim()
-        if self.state_dim not in (6, 8):
+        if self.state_dim != 6 and self.state_dim < 8:
             raise RuntimeError(
                 f"observation.state の次元 {self.state_dim} に対応する構成が不明。"
-                " 6 (eef_pos+axis_angle) か 8 (+gripper_qpos) のみ対応する。"
+                " 6 (eef_pos+axis_angle) か 8 以上 (+gripper_qpos、余りはゼロ埋め)"
+                " のみ対応する。"
             )
+        if self.state_dim > 8:
+            # π0 系は max_state_dim=32 を宣言しており、統計もその次元で
+            # 保存されている場合がある。lerobot 内部の pad_vector と同じく
+            # 後ろをゼロで埋める（_to_state 側で行う）。
+            print(f"[MyPolicy] state を 8 -> {self.state_dim} へゼロ埋めして渡す")
 
         print(
             f"[MyPolicy] weights: {_WEIGHTS_DIR}"
@@ -752,17 +758,25 @@ class MyPolicy(BasePolicy):
         return t.to(self.device)
 
     def _to_state(self, obs: dict[str, np.ndarray]):
-        """eef_pos(3) + axis_angle(3) [+ gripper_qpos(2)] を組み立てる。"""
+        """eef_pos(3) + axis_angle(3) [+ gripper_qpos(2)] を組み立てる。
+
+        state_dim が 8 を超える checkpoint（π0 系は max_state_dim=32 を宣言し、
+        統計もその次元で保存されていることがある）では後ろをゼロで埋める。
+        lerobot の pad_vector と同じ扱いで、正規化は統計の次元で走るため、
+        こちらが短い配列を渡すと形が合わずに落ちる。
+        """
         torch = self.torch
         parts = [
             np.asarray(obs["robot0_eef_pos"], dtype=np.float32).reshape(3),
             self._quat2axisangle(obs["robot0_eef_quat"]),
         ]
-        if self.state_dim == 8:
+        if self.state_dim >= 8:
             parts.append(
                 np.asarray(obs["robot0_gripper_qpos"], dtype=np.float32).reshape(2)
             )
         state = np.concatenate(parts).astype(np.float32)
+        if state.size < self.state_dim:
+            state = np.pad(state, (0, self.state_dim - state.size))
         return torch.from_numpy(state).unsqueeze(0).to(self.device)
 
     @staticmethod
