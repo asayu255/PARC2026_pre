@@ -31,6 +31,7 @@ detect_prefix() {
     local log
     for log in $(ls -t logs/sweep_*.log 2>/dev/null); do
         grep -q '既に別のスイープが動いている' "$log" && continue
+        SWEEP_SRC_LOG="$log"
         sed -n 's#.*results/\([A-Za-z0-9_.-]*\)_<ラベル>/.*#\1#p' "$log" | head -1
         return 0
     done
@@ -39,7 +40,12 @@ detect_prefix() {
 
 PREFIX="${1:-}"
 if [ -z "$PREFIX" ]; then
-    PREFIX="$(detect_prefix || true)"
+    # サブシェルで呼ぶと SWEEP_SRC_LOG が親に残らないので、いったんファイルへ
+    PREFIX="$(detect_prefix > /tmp/.parc_prefix.$$ 2>/dev/null; cat /tmp/.parc_prefix.$$ 2>/dev/null; rm -f /tmp/.parc_prefix.$$)"
+    SWEEP_SRC_LOG="$(for log in $(ls -t logs/sweep_*.log 2>/dev/null); do
+        grep -q '既に別のスイープが動いている' "$log" && continue
+        echo "$log"; break
+    done)"
     if [ -n "$PREFIX" ]; then
         echo "[status] 接頭辞を最新のスイープログから判定: $PREFIX"
     else
@@ -47,7 +53,15 @@ if [ -z "$PREFIX" ]; then
         echo "[status] スイープログが無いので既定の接頭辞を使う: $PREFIX"
     fi
 fi
-EPISODES="${2:-${PARC_SWEEP_EPISODES:-50}}"
+# エピソード数も同じログから拾う。既定の 50 のままだと標準誤差の表示が
+# 実際より小さく出て、**読んではいけない差を読める差として見せてしまう**。
+# 10 ep x 4 タスクなら 6.3 pt なのに 2.8 pt と表示された実績がある。
+EPISODES="${2:-${PARC_SWEEP_EPISODES:-}}"
+if [ -z "$EPISODES" ] && [ -n "${SWEEP_SRC_LOG:-}" ]; then
+    EPISODES="$(sed -n 's#.*エピソード  : \([0-9][0-9]*\) / 条件.*#\1#p' "$SWEEP_SRC_LOG" | head -1)"
+    [ -n "$EPISODES" ] && echo "[status] エピソード数をログから判定: $EPISODES / 条件"
+fi
+EPISODES="${EPISODES:-50}"
 
 echo "=== プロセス ==============================================="
 if pgrep -af 'sweep_ensemble\.sh' >/dev/null 2>&1; then
