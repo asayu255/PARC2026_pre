@@ -420,7 +420,7 @@ class OFTModel:
         )
 
         with torch.inference_mode():
-            actions = self.vla.predict_action(
+            out = self.vla.predict_action(
                 **inputs,
                 unnorm_key=self.unnorm_key,
                 do_sample=False,
@@ -429,8 +429,11 @@ class OFTModel:
                 action_head=self.action_head,
                 use_film=False,
             )
-        # action head を渡した経路では torch テンソル（しかも GPU 上）が返る。
-        # 本家の numpy 前提とは違うので、こちらで受ける。
+        # 戻り値は (unnormalized_actions, actions_hidden_states) のタプルである
+        # （型注釈は np.ndarray と書いてあるが実際は 2 要素。
+        #  modeling_prismatic.py:1055）。隠れ状態は GPU 上のテンソルなので、
+        # タプルのまま numpy へ渡すと変換に失敗する。
+        actions = out[0] if isinstance(out, tuple) else out
         if hasattr(actions, "detach"):
             actions = actions.detach().float().cpu().numpy()
         return np.asarray(actions, dtype=np.float32).reshape(NUM_ACTIONS_CHUNK, ACTION_DIM)
