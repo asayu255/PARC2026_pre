@@ -1,10 +1,87 @@
 # PARC 2026 予選 — 進捗まとめ
 
-最終更新: 2026-08-10 / ホスト: `yamabuki`（`wakaba` と共有ホーム）/
+最終更新: 2026-08-11 / ホスト: `yamabuki`（`wakaba` と共有ホーム）/
 ブランチ: `claude/repository-code-progress-check-cconqv`
 
 詳細な作業記録は [ENVIRONMENT_SETUP.md](ENVIRONMENT_SETUP.md)（時系列）。
 本書はその要約で、節番号は同ファイルを指す。
+
+---
+
+## 0. ベースモデルを OpenVLA-OFT+ に替えた（2026-08-11）
+
+SmolVLA では**軌跡の部分点が頭打ち**で、8 本中 6 本がゴールに届かないという
+失敗モードに手が届かなかった。モデルそのものを替える。
+
+LIBERO-Plus のリーダーボード（[論文](https://arxiv.org/abs/2510.13626) /
+[モデルカード](https://huggingface.co/Sylvest/openvla-7b-oft-finetuned-libero-plus-mixdata)）:
+
+| Model | Camera | Robot | Language | Light | BG | Noise | Layout | **Total** |
+|---|---|---|---|---|---|---|---|---|
+| OpenVLA | 0.8 | 3.5 | 23.0 | 8.1 | 50.4 | 15.2 | 28.5 | 17.3 |
+| π₀ | 13.8 | 6.0 | 58.8 | 85.0 | 90.7 | 79.0 | 68.9 | 54.6 |
+| π₀-Fast | 65.1 | 21.6 | 61.0 | 73.2 | 97.7 | 74.4 | 68.8 | 64.2 |
+| OpenVLA-OFT | 56.4 | 31.9 | 79.5 | 88.7 | 97.3 | 75.8 | 74.2 | 70.0 |
+| **OpenVLA-OFT+** | **92.8** | 30.3 | **85.8** | **94.9** | 93.9 | **89.3** | **77.6** | **79.6** |
+
+SmolVLA は評価対象にすら入っていない。「+」は **LIBERO-plus データでの
+mix-SFT** を意味し、PARC が使う摂動分布そのもので学習されている。
+論文の主張どおりカメラ視点が全モデルの急所で、そこだけ OFT+ が突出している。
+
+`Sylvest/openvla-7b-oft-finetuned-libero-plus-mixdata`（15.1 GB, bf16）。
+
+### 実測（2026-08-11、yamabuki）
+
+| | 値 | 制限 |
+|---|---|---|
+| オフライン読み込み | 成功（HF 未接続） | — |
+| ロード | **10.2s**（`device_map` 無しだと 139s） | 120s |
+| VRAM | **14.40 GiB**（peak 14.97） | 採点機は未知 |
+| レイテンシ | mean 0.025s / **max 0.208s** | 10s |
+| zip | 16 GiB / 展開 15 GB | 20 GiB / 40 GB |
+
+### 公開 4 タスク（10 ep × 4、同一ラウンド）
+
+| 条件 | success | collision | cartesian | jerk | sparc |
+|---|---|---|---|---|---|
+| `ref`（本家既定 exec=8） | **0.675** | 0.125 | 0.986 | 6.772 | **-2.435** |
+| `nocrop` | 0.550 | 0.150 | 1.019 | 7.163 | -2.825 |
+| `ens`（ensembling h=8） | 0.550 | 0.150 | **0.824** | **3.423** | -2.638 |
+
+- **center crop は維持**。外すと全指標で悪化し、良くなる兆候が無い。軸を閉じる
+- **ensembling は jerk を 49.5% 下げる**（閾値 15% を大きく超える）。ただし
+  success が 12.5 pt 落ち、sparc は逆を向く。**両方提出して採点に決めさせる**
+
+### π0 / π0.5 は閉じた
+
+lerobot 0.4.4 の π0 系は **openpi 互換に差し替えた transformers（custom 4.53）
+を前提**にしており、素の transformers では 2 つ別々に壊れる。
+
+1. `Warning: Could not remap state dict keys` の直後に `return model` する経路が
+   あり、**ランダム初期化のまま起動する**（`modeling_pi05.py:1045`）。
+   checkpoint 側は adaRMS 形式（`input_layernorm.dense.weight`）なのに
+   モデル側は素の RMSNorm を作り、`embed_tokens.weight` も欠ける
+2. 仮に載っても Gemma の attention で `1018 vs 1068` のブロードキャスト失敗
+
+lerobot 0.4.4 に `pi` extra は存在せず、差し替え版の入手先も書かれていない。
+同じ lerobot が SmolVLA 用に `transformers>=4.57.1` を要求しており両立しない。
+期待値でも π₀ は 54.6 で OFT+ の 79.6 に負けるため、追う価値が無い。
+
+### OFT で注意すべきこと（再開時に必ず読む）
+
+- **gripper の変換が必須。** 本家は `env.step` の直前で `-sign(2g - 1)` を
+  掛ける（RLDS のデータローダが gripper だけ `[0,1]` かつ 0=閉じる で
+  持っているのに対し、環境は `[-1,+1]` かつ -1=開く）。**入れないと
+  グリッパーが常に逆に動き、例外は出ない**
+- **ensembling で gripper を平均してはいけない。** ±1 に二値化済みなので
+  平均すると中間値になる。OFT のときは既定で `gripper=latest` にしてある
+- **提出 zip では環境変数を設定できない**ので、`policy_server.py` の既定が
+  そのまま採点で走る。OFT の既定は本家 `GenerateConfig` に合わせてある
+  （ensembling なし・`exec=8`）
+- `predict_action` は `(actions, hidden_states)` の**タプル**を返す
+  （型注釈は `np.ndarray` と書いてあるが違う）
+- **評価は parc-policy、サーバーは parc-oft** で動かす。transformers の版が
+  違うため同居できない（`PARC_POLICY_PYTHON` で切り替える）
 
 ---
 
@@ -168,7 +245,11 @@ ensembling が改善したのは軌道の**滑らかさ**であって、上の�
 
 | ファイル | 用途 |
 |---|---|
-| `tools/make_submission.sh` | 提出 zip をビルド |
+| `tools/make_submission.sh` | 提出 zip をビルド（`PARC_SUBMISSION_SRC` で対象を切替） |
+| `tools/stage_oft_submission.sh` | **OFT 版の提出物を `submission_oft/` に組む** |
+| `tools/setup_oft_env.sh` | `parc-oft`（transformers 4.40.1）を作る |
+| `tools/oft_smoke.py` | OFT のロード・VRAM・レイテンシをサーバー抜きで測る |
+| `tools/fetch_model.sh` | HF から checkpoint を取る（CLI 名に依存しない） |
 | `tools/verify_clean_env.sh` | **採点環境の再現検証（提出前に必須）** |
 | `tools/vendor_lerobot.sh` | pip で入らない依存を同梱し requirements を再生成 |
 | `tools/run_policy_server.sh` | シェル状態に依存せずポリシーサーバーを起動 |
@@ -195,3 +276,14 @@ ensembling が改善したのは軌道の**滑らかさ**であって、上の�
 | `PARC_WEIGHTS_DIR` | 未設定 | 別の重みを指す（追加学習の評価用） |
 | `PARC_FLIP180` | `1` | 画像の 180 度回転 |
 | `PARC_LORA_LOWRES` | `0` | **学習時のみ。** 1 で学習画像を評価解像度へ落とす |
+
+OpenVLA-OFT のときだけ効くもの。`PARC_WEIGHTS_DIR` の `config.json` の
+`model_type` が `openvla` なら自動でそちらの経路に入る。
+
+| 環境変数 | 既定 | 意味 |
+|---|---|---|
+| `PARC_POLICY_PYTHON` | 自動探索 | サーバーを立てる python。OFT は `parc-oft` |
+| `PARC_OFT_GRIPPER` | `binarize` | `linear` で sign を取らない。`off` で変換しない |
+| `PARC_OFT_CENTER_CROP` | `1` | 本家の中央 90% クロップ。**外すと悪化する** |
+| `PARC_OFT_UNNORM` | 自動 | 逆正規化の統計キー。4 スイートとも同一値なので通常不要 |
+| `PARC_OFT_DEVICE_MAP` | `1` | シャードを直接 GPU へ。0 にすると 139 秒かかる |
