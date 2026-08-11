@@ -419,6 +419,9 @@ class MyPolicy(BasePolicy):
             )
             cfg.num_steps = steps_override
 
+        if self.policy_type in ("pi0", "pi05", "pi0_fast"):
+            self._ensure_siglip_check()
+
         model = policy_cls.from_pretrained(
             str(_WEIGHTS_DIR), config=cfg, local_files_only=True
         )
@@ -462,6 +465,65 @@ class MyPolicy(BasePolicy):
             f" | num_steps={getattr(model.config, 'num_steps', '?')}"
         )
         return model
+
+    @staticmethod
+    def _ensure_siglip_check() -> None:
+        """π0 系が起動時に要求する transformers.models.siglip.check を用意する。
+
+        lerobot 0.4.4 の π0 / π0.5 / π0-FAST は、openpi 互換のために差し替えた
+        transformers（custom 4.53）を前提にしている。その版だけが siglip に
+        check モジュールを持ち、素の transformers では ImportError になって
+        「An incorrect transformer version is used」で構築が止まる
+        （modeling_pi05.py:576-584）。
+
+        一方で lerobot 0.4.4 の smolvla は transformers>=4.57.1 を要求しており、
+        同じ環境に両方を満たす版は無い。差し替え版の配布先も 0.4.4 の
+        メタデータには書かれていない（`pi` extra 自体が 0.4.4 に存在しない）。
+
+        そこで PARC_PI_SKIP_TF_CHECK=1 のときだけ、確認を通すスタブを入れる。
+        **これは検証を飛ばすのではなく、検証の方法を実測に移すという意味である。**
+        差し替え版が SigLIP の実装そのものを変えているなら出力は壊れるが、
+        それは公開 4 タスクの成功率を見れば一発で分かる（π0.5 は LIBERO で
+        96.85% と報告されているので、壊れていれば 0 付近に出る）。
+
+        重みが読めたかどうかは別問題で、pi05 の from_pretrained は例外を
+        握り潰して**ランダム初期化のまま返す**経路を持つ。起動ログの
+        「All keys loaded successfully!」を必ず確認すること。
+        """
+        import importlib
+        import sys
+        import types
+
+        try:
+            importlib.import_module("transformers.models.siglip.check")
+            return
+        except ImportError:
+            pass
+
+        if os.environ.get("PARC_PI_SKIP_TF_CHECK") != "1":
+            raise RuntimeError(
+                "この checkpoint (π0 系) は差し替え版 transformers を前提にしており、"
+                " 素の transformers には transformers.models.siglip.check が無い。\n"
+                "  PARC_PI_SKIP_TF_CHECK=1 を付けるとスタブで通せるが、"
+                " SigLIP の実装差が出力に効く可能性があるため、\n"
+                "  通したあとは必ず公開タスクで成功率を測ること。"
+            )
+
+        stub = types.ModuleType("transformers.models.siglip.check")
+        stub.check_whether_transformers_replace_is_installed_correctly = lambda: True
+        sys.modules["transformers.models.siglip.check"] = stub
+        # `from transformers.models.siglip import check` は属性を先に見るので、
+        # 親パッケージ側にも生やしておく。
+        import transformers.models.siglip as _siglip
+
+        _siglip.check = stub
+        print(
+            "[MyPolicy] 警告: transformers.models.siglip.check をスタブで通した"
+            " (PARC_PI_SKIP_TF_CHECK=1)。\n"
+            "[MyPolicy]   差し替え版 transformers を使っていないため、SigLIP の"
+            " 実装差が出力に出る可能性がある。\n"
+            "[MyPolicy]   公開タスクの成功率を測るまで提出してはいけない。"
+        )
 
     def _resolve_image_keys(self) -> None:
         """モデルへ渡す画像キーを policy_preprocessor.json から導出する。
