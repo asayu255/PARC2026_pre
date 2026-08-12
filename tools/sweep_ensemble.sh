@@ -313,6 +313,8 @@ for spec in $CONDS; do
 
     # レイテンシは必ず見る。1 リクエストでも 10 秒を超えるとトラックが 0 点になる。
     grep 'レイテンシ' "$SRVLOG" | tail -3 | sed 's/^/    /'
+    # |Δaction| は slew の上限を選ぶための材料。制限が無効でも出る。
+    grep 'Δaction' "$SRVLOG" | tail -3 | sed 's/^/    /'
 
     cleanup; SRV=""
     for _ in $(seq 1 30); do health_ok || break; sleep 1; done
