@@ -369,6 +369,31 @@ def test_tta_crop_scales_are_distinct_and_centred_on_the_default():
 
     assert scales[0] == oft_policy.CENTER_CROP_SCALE   # 1 視点なら既定と同じ
     assert len(set(scales)) == len(scales)
+    assert all(0.5 < x <= 1.0 for x in scales)         # 分布内に留める
+
+
+def test_every_prefix_of_the_crop_scales_stays_centred():
+    """PARC_OFT_TTA=N は先頭 N 個を使う。どの N でも平均が既定の近くに居ること。
+
+    片側に寄った集合で平均すると、視点を増やすほど系統的にズームが偏る。
+    TTA は分散を減らすためのものなので、偏りを持ち込んでは意味が無い。
+    偶数個では必ず片側が 1 つ多くなるため、厳密な対称は要求しない。
+    """
+    scales = oft_policy.TTA_CROP_SCALES
+    default = oft_policy.CENTER_CROP_SCALE
+
+    for n in range(1, len(scales) + 1):
+        mean = sum(scales[:n]) / n
+        assert abs(mean - default) <= 0.03, f"{n} 視点の平均が {mean:.4f} で偏っている"
+
+
+def test_the_measured_prefixes_are_frozen():
+    """先頭 4 つは tta2 / tta4 として実測済みで、採点にも投げてある。
+
+    ここを並べ替えると過去の測定値が別の構成のものになる。視点を足すのは
+    後ろへ足すことでしか行わない。
+    """
+    assert oft_policy.TTA_CROP_SCALES[:4] == (0.90, 0.95, 0.85, 1.00)
 
 
 def test_prepare_image_honours_an_explicit_crop_scale():
