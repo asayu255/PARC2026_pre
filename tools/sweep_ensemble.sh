@@ -176,7 +176,11 @@ if command -v flock >/dev/null 2>&1; then
         echo "[sweep] 既に別のスイープが動いている。中止する。"
         if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
             echo "    pid=$holder  $(tr '\0' ' ' < "/proc/$holder/cmdline" 2>/dev/null | cut -c1-90)"
-            echo "        止めるには: kill $holder"
+            # プロセスグループごと送る。`kill $holder` だと bash 本体にしか
+            # 届かず、bash は前景の `python -m pipeline` が終わるまで trap を
+            # 走らせないので、その条件（数十分）が終わるまで止まらない。
+            echo "        止めるには: kill -TERM -$holder    # 先頭の - はプロセスグループ"
+            echo "        （評価中の python ごと落とす。kill $holder だと条件の終わりまで効かない）"
         else
             echo "        止めるには: pkill -f sweep_"
         fi
@@ -184,6 +188,18 @@ if command -v flock >/dev/null 2>&1; then
     fi
     echo "$$" > "$PIDFILE"
 fi
+
+# --- コンソール出力の控えを自分で持つ ---------------------------------------
+# 呼び出し側は普通 `> logs/sweep_<接頭辞>.log` で回すが、走行中に同じ行を
+# もう一度叩くと（起動できたか確かめたくなる）、その `>` が**走行中のログを
+# 切り詰める**。2 回やっている。中止されるのは後発なのに、記録が消えるのは
+# 先発のほうなので、気づくのが遅れる。
+#
+# ロックを取れた側だけが、自分の PID 付きの控えへ複製する。呼び出し側の
+# リダイレクト先が潰されても、こちらは残る。
+ROUND_LOG="logs/sweep_${PREFIX}_$$.log"
+exec > >(tee -a "$ROUND_LOG") 2>&1
+echo "[sweep] このラウンドの控え: $ROUND_LOG"
 
 SRV=""
 ROUND_SIG=""          # このラウンドが読んだモデル。条件をまたいで変わってはいけない

@@ -30,13 +30,20 @@ detect_prefix() {
     # ログで判定すると外れることがある。同じラウンドを二重起動すると、
     # 2 回目が `> logs/sweep_<接頭辞>.log` で**走行中のログを上書きし**、
     # 中止メッセージだけを残す。実際にそれで「走っていない」と誤判定した。
-    local newest_result
-    newest_result="$(ls -td results/*_*/ 2>/dev/null | head -1)"
-    if [ -n "$newest_result" ]; then
-        newest_result="$(basename "${newest_result%/}")"
-        printf '%s\n' "${newest_result%_*}"
+    #
+    # 「接頭辞が取れないディレクトリ」は飛ばす。results/ には条件ディレクトリ
+    # 以外も置かれる。前ラウンドの残骸を results/_stale/ へ退避したところ、
+    # それが `*_*` に一致し（先頭の `_` が区切りとして読まれる）、しかも mv で
+    # 最新になったため接頭辞が空文字になり、判定が既定の "ens" へ落ちて
+    # 何ヶ月も前のラウンドを現在の結果として表示した。
+    local d name prefix
+    for d in $(ls -td results/*_*/ 2>/dev/null); do
+        name="$(basename "${d%/}")"
+        prefix="${name%_*}"
+        [ -n "$prefix" ] || continue          # `_stale` のような名前
+        printf '%s\n' "$prefix"
         return 0
-    fi
+    done
 
     # スイープ本体は「出力 : results/<接頭辞>_<ラベル>/」を冒頭に出す。
     #
