@@ -591,9 +591,10 @@ smooth ≤ 1 なら **回 6 は Σ=2.344 を出すのに最低 3 本必要**で�
 ログに出ない。表の「早期終了」は 7 本ぶんの観測で、8 本目は不明である。
 `POST /act` を数えれば 8 本全部復元できる:
 
-    grep -oE 'POST /(act|reset)' <ログ> | \
-      awk '/reset/{if(n!="")print "ep" (++e) ": " n " steps"; n=0; next} {n++} \
-           END{if(n!="")print "ep" (++e) ": " n " steps"}'
+    bash tools/grading_episodes.sh <採点ログ> [スコア]
+
+スコアも渡すと Σsmooth と 1 本あたりの値、その本数での上限（成功数/8）と
+達成率まで出す。逆算値が 1 を超えたら仮説が成り立っていないので、それも表示する。
 
 ### 追加学習は閉じた（§35）
 
@@ -642,6 +643,7 @@ smooth ≤ 1 なら **回 6 は Σ=2.344 を出すのに最低 3 本必要**で�
 | `tools/run_policy_server.sh` | シェル状態に依存せずポリシーサーバーを起動 |
 | `tools/sweep_ensemble.sh` | A/B スイープ（条件ごとに環境変数を消して実行） |
 | `tools/sweep_status.sh` | 走行中スイープの進捗を 1 コマンドで表示 |
+| `tools/grading_episodes.sh` | **採点ログから 8 本の step 数を復元しスコアを分解** |
 | `tools/respin_parc_env.sh` | **既存 zip の `parc_env` だけ差し替える**（12 GB を作り直さない） |
 | `tools/show_ensemble_results.py` | 結果 JSON から比較表（`--per-task` で内訳） |
 | `tools/train_lora.sh` / `tools/merge_lora.py` | 追加学習とマージ（§27 で使用） |
