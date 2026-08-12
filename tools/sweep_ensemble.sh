@@ -38,7 +38,16 @@ EPISODES="${PARC_SWEEP_EPISODES:-50}"
 MAX_STEPS="${PARC_SWEEP_MAX_STEPS:-300}"
 SEED="${PARC_SWEEP_SEED:-42}"
 PORT="${PARC_PORT:-8002}"
-HEALTH_TIMEOUT="${PARC_SWEEP_HEALTH_TIMEOUT:-180}"
+# 起動待ちの上限。既定は長めに取る。
+#
+# 180 秒だと足りないことがある。15 GB の checkpoint を NFS から読む最中に
+# 提出物の zip（同じ 15 GB を読んで 12 GB を書く）が走ると、通常 10 秒の
+# ロードが 180 秒を超え、条件が丸ごと飛んだ。飛んだことはログに出るが、
+# そのログを二重起動で潰していたため気づくのが遅れた。
+#
+# 長くして損をするのは「本当に起動しない」ときだけで、そのときは
+# サーバーのプロセスが死んで即座に検出される。
+HEALTH_TIMEOUT="${PARC_SWEEP_HEALTH_TIMEOUT:-600}"
 
 # 出力先の接頭辞。別のラウンドを回すときに前のラウンドを潰さないためのもの
 # （条件ディレクトリは毎回 rm -rf される）。results/<接頭辞>_<ラベル>/ になる。
