@@ -387,13 +387,22 @@ def test_every_prefix_of_the_crop_scales_stays_centred():
         assert abs(mean - default) <= 0.03, f"{n} 視点の平均が {mean:.4f} で偏っている"
 
 
-def test_the_measured_prefixes_are_frozen():
-    """先頭 4 つは tta2 / tta4 として実測済みで、採点にも投げてある。
+def test_the_shipped_prefix_is_frozen():
+    """先頭 2 つは tta2 として採点で 0.304 を出した構成である。
 
-    ここを並べ替えると過去の測定値が別の構成のものになる。視点を足すのは
-    後ろへ足すことでしか行わない。
+    ここを並べ替えると、いま提出している設定が黙って別物になる。
     """
-    assert oft_policy.TTA_CROP_SCALES[:4] == (0.90, 0.95, 0.85, 1.00)
+    assert oft_policy.TTA_CROP_SCALES[:2] == (0.90, 0.95)
+
+
+def test_no_view_skips_the_crop():
+    """倍率 1.00 のクロップは恒等変換で、「クロップしない」条件と同値である。
+
+    それは単独で測って悪化した条件（`PARC_OFT_CENTER_CROP=0`）なので、
+    平均に混ぜてはいけない。旧版は 4 番目が 1.00 で、その `tta4` は採点
+    0.271（`tta2` は 0.304）だった。
+    """
+    assert all(x < 1.0 for x in oft_policy.TTA_CROP_SCALES)
 
 
 def test_prepare_image_honours_an_explicit_crop_scale():
