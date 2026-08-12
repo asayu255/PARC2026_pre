@@ -424,9 +424,8 @@ class MyPolicy(BasePolicy):
         self._lat_n = 0
         self._lat_slow = 0
         # slew の上限を決めるための |Δaction| 計測（制限が無効でも回る）
-        self._d_max = 0.0
-        self._d_sum = 0.0
-        self._d_n = 0
+        self._d_xyz: list[float] = []
+        self._d_rot: list[float] = []
         self._d_clip = 0
         self.policy_type = "smolvla"   # _load_model が config から上書きする
         self.oft = None                # OpenVLA-OFT のときだけ入る
@@ -1068,20 +1067,36 @@ class MyPolicy(BasePolicy):
     def _track_delta(self, action: np.ndarray) -> None:
         """slew 制限を掛ける**前**の変化量を記録する。上限値を選ぶための計測。
 
-        制限が無効でも動く。無効のまま 1 ラウンド回せば「跳ねがどれくらいか」
-        が分かり、そこから上限を決められる。
+        制限が無効でも動く。無効のまま 1 ラウンド回せば分布が分かり、そこから
+        上限を決められる。
+
+        **並進と回転を分けて持つ。** 一つの上限を 2 種類の物理量へ一律に掛けるのは
+        `ACT_SCALE` が失敗したやり方そのものである。どちらが跳ねているのかは
+        分けて測らないと分からない。
+
+        **平均と最大だけでは足りない。** 最初の計測で mean=0.0697 / max=0.1953 と
+        mean=0.0188 / max=0.1398 が出たが、これでは外れ値が 3 step なのか 30 step
+        なのか分からず、上限を勘で引くことになる。分位点で持つ。
         """
         prev = self._prev_action
         if prev is None:
             return
-        d = float(np.abs(np.asarray(action)[:6] - prev[:6]).max())
-        self._d_n += 1
-        self._d_sum += d
-        if d > self._d_max:
-            self._d_max = d
-        lim = self.ACT_SLEW if self.ACT_SLEW > 0.0 else self.ACT_SLEW_ROT
-        if lim > 0.0 and d > lim:
+        d = np.abs(np.asarray(action, dtype=np.float32)[:6] - prev[:6])
+        xyz = float(d[:3].max())
+        rot = float(d[3:].max())
+        self._d_xyz.append(xyz)
+        self._d_rot.append(rot)
+        rot_lim = self.ACT_SLEW_ROT if self.ACT_SLEW_ROT > 0 else self.ACT_SLEW
+        if (self.ACT_SLEW > 0.0 and xyz > self.ACT_SLEW) or \
+           (rot_lim > 0.0 and rot > rot_lim):
             self._d_clip += 1
+
+    @staticmethod
+    def _delta_desc(name: str, values: list) -> str:
+        v = np.asarray(values, dtype=np.float64)
+        p50, p90, p99 = np.percentile(v, [50, 90, 99])
+        return (f"{name} mean={v.mean():.4f} p50={p50:.4f}"
+                f" p90={p90:.4f} p99={p99:.4f} max={v.max():.4f}")
 
     def _slew_limit(self, action: np.ndarray) -> np.ndarray:
         """前 step の指令からの変化量を上限で切る。gripper は触らない。
@@ -1194,16 +1209,17 @@ class MyPolicy(BasePolicy):
                 f" slow(>{self.SLOW_REQUEST_SEC:g}s)={self._lat_slow}",
                 flush=True,
             )
-        if self._d_n:
+        if self._d_xyz:
             print(
-                f"[MyPolicy] 前エピソードの |Δaction| (次元 0..5 の最大):"
-                f" mean={self._d_sum / self._d_n:.4f} max={self._d_max:.4f}"
-                f" n={self._d_n} 上限に当たった step={self._d_clip}"
-                f" (slew={self._slew_desc()})",
+                f"[MyPolicy] 前エピソードの |Δaction| n={len(self._d_xyz)}"
+                f" 上限に当たった step={self._d_clip} (slew={self._slew_desc()})"
+                f"\n[MyPolicy]   {self._delta_desc('xyz', self._d_xyz)}"
+                f"\n[MyPolicy]   {self._delta_desc('rot', self._d_rot)}",
                 flush=True,
             )
-        self._d_max = self._d_sum = 0.0
-        self._d_n = self._d_clip = 0
+        self._d_xyz = []
+        self._d_rot = []
+        self._d_clip = 0
         self._lat_max = self._lat_sum = 0.0
         self._lat_n = self._lat_slow = 0
 

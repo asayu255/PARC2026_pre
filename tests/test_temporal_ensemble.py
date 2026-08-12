@@ -78,8 +78,9 @@ def make_policy(mod, chunk_fn):
     p._warming = True          # レイテンシ集計とデバッグダンプを黙らせる
     p._lat_max = p._lat_sum = 0.0
     p._lat_n = p._lat_slow = 0
-    p._d_max = p._d_sum = 0.0
-    p._d_n = p._d_clip = 0
+    p._d_xyz = []
+    p._d_rot = []
+    p._d_clip = 0
     p.model = None
     p.calls = 0
 
@@ -426,9 +427,28 @@ def test_delta_tracking_measures_the_raw_jump(monkeypatch):
 
     drive(p, 3)
 
-    assert p._d_n == 2                       # 先頭 step は基準が無いので数えない
-    assert p._d_max == pytest.approx(0.5)    # 0.1 に切った後の値ではない
+    assert len(p._d_xyz) == 2                # 先頭 step は基準が無いので数えない
+    assert max(p._d_xyz) == pytest.approx(0.5)   # 0.1 に切った後の値ではない
     assert p._d_clip == 2
+
+
+def test_delta_tracking_separates_translation_from_rotation(monkeypatch):
+    """並進と回転は別の物理量。混ぜて 1 つの上限を引くのが ACT_SCALE の失敗。"""
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1)
+
+    def chunks(i):
+        a = np.zeros((50, 7), np.float32)
+        if i:
+            a[:, :3] = 0.4          # 並進だけ跳ねる
+            a[:, 3:6] = 0.01
+        return a
+
+    p = make_policy(mod, chunks)
+    p._warming = False
+    drive(p, 2)
+
+    assert p._d_xyz == pytest.approx([0.4])
+    assert p._d_rot == pytest.approx([0.01])
 
 
 def test_delta_tracking_runs_with_the_limiter_off(monkeypatch):
@@ -439,8 +459,26 @@ def test_delta_tracking_runs_with_the_limiter_off(monkeypatch):
 
     drive(p, 3)
 
-    assert p._d_n == 2 and p._d_clip == 0
-    assert p._d_max == pytest.approx(0.3)
+    assert len(p._d_xyz) == 2 and p._d_clip == 0
+    assert max(p._d_xyz) == pytest.approx(0.3)
+
+
+def test_delta_clip_counts_a_rotation_only_breach(monkeypatch):
+    """回転だけ上限に当たった step も数える。"""
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1,
+                      PARC_ACT_SLEW=0.5, PARC_ACT_SLEW_ROT=0.01)
+
+    def chunks(i):
+        a = np.zeros((50, 7), np.float32)
+        if i:
+            a[:, 3:6] = 0.2         # 回転だけ跳ねる。並進は上限 0.5 に届かない
+        return a
+
+    p = make_policy(mod, chunks)
+    p._warming = False
+    drive(p, 2)
+
+    assert p._d_clip == 1
 
 
 def test_delta_tracking_resets_between_episodes(monkeypatch):
@@ -451,4 +489,14 @@ def test_delta_tracking_resets_between_episodes(monkeypatch):
     drive(p, 3)
     p.reset("next")
 
-    assert (p._d_n, p._d_clip, p._d_max, p._d_sum) == (0, 0, 0.0, 0.0)
+    assert p._d_xyz == [] and p._d_rot == [] and p._d_clip == 0
+
+
+def test_delta_summary_reports_percentiles(monkeypatch):
+    """mean と max だけでは外れ値が何 step あるか分からない。"""
+    mod = load_module(monkeypatch)
+    line = mod.MyPolicy._delta_desc("xyz", [0.01] * 90 + [0.2] * 10)
+
+    assert "p50=0.0100" in line
+    assert "max=0.2000" in line
+    assert "p90=" in line and "p99=" in line
