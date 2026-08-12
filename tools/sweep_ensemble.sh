@@ -133,6 +133,35 @@ fi
 
 mkdir -p logs
 
+# --- 前のラウンドの残骸を検出する -------------------------------------------
+# 結果表は results/<接頭辞>_* を**全部**拾う。条件ディレクトリは実行時に
+# rm -rf されるが、それは今回のラベルだけである。同じ接頭辞で条件を入れ替えて
+# 回し直すと、前のラウンドのラベルが消えずに残り、表に混ざる。
+#
+# 実際に起きかけた: oft5 を TTA4 土台で回し、途中で TTA2 土台に組み直した。
+# ラベルが tta4 -> tta2/slew12/slew08 と変わるので results/oft5_tta4/ が残り、
+# 土台の違う行が同じ表に並ぶところだった。数字は出るので気づけない。
+STALE=""
+for d in "results/${PREFIX}_"*/; do
+    [ -d "$d" ] || continue
+    label="$(basename "$d")"; label="${label#${PREFIX}_}"
+    case " $LABELS " in *" $label "*) continue ;; esac
+    STALE="$STALE $d"
+done
+if [ -n "$STALE" ]; then
+    echo "[sweep] 接頭辞 $PREFIX に、今回の条件に無いディレクトリが残っている:"
+    for d in $STALE; do echo "    $d"; done
+    echo
+    echo "        結果表は results/${PREFIX}_* を全部拾うので、前のラウンドの"
+    echo "        行が今回の表に混ざる。土台が違えば比較にならない。"
+    echo "        消すか:"
+    # shellcheck disable=SC2086
+    echo "            rm -rf$STALE"
+    echo "        別の接頭辞にすること:"
+    echo "            PARC_SWEEP_PREFIX=${PREFIX}b ..."
+    exit 1
+fi
+
 # --- 多重起動の防止 ---------------------------------------------------------
 # sweep_nexec.sh と同じロックを使う。別種のスイープでも、同時に走れば同じ
 # ポートと同じ出力先を奪い合う。先発だけがポートを握り、後発のサーバーは
