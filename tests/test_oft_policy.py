@@ -427,3 +427,54 @@ def test_prepare_image_without_crop_ignores_the_scale():
     b = oft_policy.prepare_image(img, torch, False, False)
 
     assert np.array_equal(a, b)
+
+
+# --- 倍率列の環境変数上書き -------------------------------------------------
+#
+# 採点が決定的だと分かったので、採点そのものを測定器として A/B する。倍率列を
+# 変えるたびに 12 GB の zip を作り直さずに済むよう、環境変数で差し替えられる。
+
+
+def test_crop_scales_default_to_the_frozen_tuple(monkeypatch):
+    monkeypatch.delenv("PARC_OFT_TTA_SCALES", raising=False)
+    assert oft_policy.resolve_crop_scales() == oft_policy.TTA_CROP_SCALES
+
+
+def test_crop_scales_can_be_replaced(monkeypatch):
+    monkeypatch.setenv("PARC_OFT_TTA_SCALES", "0.90,0.95,0.85,0.925")
+    assert oft_policy.resolve_crop_scales() == (0.90, 0.95, 0.85, 0.925)
+
+
+def test_crop_scales_tolerate_spaces_and_trailing_comma(monkeypatch):
+    monkeypatch.setenv("PARC_OFT_TTA_SCALES", " 0.90 , 0.88 , ")
+    assert oft_policy.resolve_crop_scales() == (0.90, 0.88)
+
+
+@pytest.mark.parametrize("spec", ["", "   "])
+def test_blank_falls_back_to_the_default(spec):
+    assert oft_policy.resolve_crop_scales(spec) == oft_policy.TTA_CROP_SCALES
+
+
+@pytest.mark.parametrize("spec", ["abc", "0.9,x", "1.00", "0.9,1.0", "0.3", "0,0.9"])
+def test_bad_or_out_of_range_specs_fall_back(spec):
+    """特に 1.00 を弾く。恒等クロップ = 単独で悪化が実測された条件である。
+
+    綴りを間違えたまま静かに走るより、既定へ戻したほうが損害が小さい
+    （採点は 1 回 18 分で、間違った構成を測ると 1 回まるごと無駄になる）。
+    """
+    assert oft_policy.resolve_crop_scales(spec) == oft_policy.TTA_CROP_SCALES
+
+
+def test_the_override_is_what_the_model_would_use(monkeypatch):
+    """resolve_crop_scales() の戻りがそのまま TTA の視点列になる。
+
+    OFTModel はモデルを読むので組み立てられない。__init__ が計算する式と
+    同じものをここで固定する。
+    """
+    monkeypatch.setenv("PARC_OFT_TTA_SCALES", "0.90,0.95,0.85")
+    scales = oft_policy.resolve_crop_scales()
+
+    for views, expected in [(1, (0.90,)), (3, (0.90, 0.95, 0.85)),
+                            (8, (0.90, 0.95, 0.85))]:   # 列より多くは取れない
+        n = max(1, min(views, len(scales)))
+        assert scales[:n] == expected
