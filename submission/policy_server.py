@@ -253,6 +253,31 @@ class MyPolicy(BasePolicy):
     #: 回転だけ別係数にしたい場合。0 以下なら ACT_SCALE に従う。
     ACT_SCALE_ROT = _env_float("PARC_ACT_SCALE_ROT", 0.0)
 
+    #: 1 step で action が変化してよい最大量（次元 0..5）。0 以下で無効。
+    #:
+    #: ACT_SCALE は失敗した。0.7 でも公開 4 タスク中 3 つが 0 になる。理由は
+    #: step 数不足ではない（生き残った 1 つは 145/300 step で終わっている）。
+    #: 振幅を一律に落とすと、掴む・押し込むといった「一定量動かないと成立
+    #: しない」操作がどれだけ step を積んでも成立しなくなる。
+    #:
+    #: だが 1mm 衝突ルールに効くのは平均速度ではなく**跳ね**である。定常的に
+    #: 動いている最中の速度は落とさず、step 間の飛びだけ抑えたい。これは
+    #: slew rate 制限そのもので、ACT_SCALE と違い定常速度を保つ。したがって
+    #: 「振幅が足りずに掴めない」という ACT_SCALE の失敗モードが原理的に
+    #: 起きない。頭打ちになるのは前 step から急に向きや大きさが変わるときだけで、
+    #: それはまさに jerk / sparc が測っている量である。
+    #:
+    #: 適正値は当てずっぽうで決めない。エピソード終了時に「1 step あたりの
+    #: |Δaction|（次元 0..5 の最大）」の平均・最大と、上限に当たった step 数を
+    #: 出す（PARC_ACT_SLEW=0 でも出る）。まず既定のまま 1 ラウンド回して分布を
+    #: 見て、そのうえで「平均には当たらず最大には当たる」値を選ぶ。
+    #:
+    #: **gripper (次元 6) には掛けない。** 開閉は二値で、遅らせると掴み損なう。
+    #: エピソード先頭は「前の指令」が存在しないので制限しない。
+    ACT_SLEW = _env_float("PARC_ACT_SLEW", 0.0)
+    #: 回転だけ別の上限にしたい場合。0 以下なら ACT_SLEW に従う。
+    ACT_SLEW_ROT = _env_float("PARC_ACT_SLEW_ROT", 0.0)
+
     #: config.json の chunk_size / n_action_steps に一致させる
     ACTION_CHUNK_SIZE = 50
 
@@ -382,6 +407,8 @@ class MyPolicy(BasePolicy):
         # 全要素の H が同じなので、古いものから順に尽きる = FIFO で捨てられる。
         self._ens: deque[list] = deque()
         self._step = 0
+        #: 直前に環境へ返した action（slew 制限の基準）。エピソード先頭は None。
+        self._prev_action: np.ndarray | None = None
         self.torch = None
         self.device = None
         self.preprocessor = None
@@ -396,6 +423,11 @@ class MyPolicy(BasePolicy):
         self._lat_sum = 0.0
         self._lat_n = 0
         self._lat_slow = 0
+        # slew の上限を決めるための |Δaction| 計測（制限が無効でも回る）
+        self._d_max = 0.0
+        self._d_sum = 0.0
+        self._d_n = 0
+        self._d_clip = 0
         self.policy_type = "smolvla"   # _load_model が config から上書きする
         self.oft = None                # OpenVLA-OFT のときだけ入る
         self.model = self._load_model()
@@ -589,6 +621,7 @@ class MyPolicy(BasePolicy):
             f"\n[MyPolicy]   ensemble={self._ensemble_desc()}"
             f"\n[MyPolicy]   act_scale={self.ACT_SCALE:g}"
             f" rot={(self.ACT_SCALE_ROT if self.ACT_SCALE_ROT > 0 else self.ACT_SCALE):g}"
+            f"\n[MyPolicy]   slew={self._slew_desc()}"
         )
         return self.oft
 
@@ -1012,6 +1045,10 @@ class MyPolicy(BasePolicy):
             action = self._queue.popleft()
         action = self._sanitize(self._scale_action(action))
         if not self._warming:
+            self._track_delta(action)
+        action = self._slew_limit(action)
+        self._prev_action = action
+        if not self._warming:
             self._record_latency(time.perf_counter() - t0)
         return action
 
@@ -1026,6 +1063,44 @@ class MyPolicy(BasePolicy):
         a = np.array(action, dtype=np.float32, copy=True).reshape(7)
         a[:3] *= self.ACT_SCALE
         a[3:6] *= rot
+        return a
+
+    def _track_delta(self, action: np.ndarray) -> None:
+        """slew 制限を掛ける**前**の変化量を記録する。上限値を選ぶための計測。
+
+        制限が無効でも動く。無効のまま 1 ラウンド回せば「跳ねがどれくらいか」
+        が分かり、そこから上限を決められる。
+        """
+        prev = self._prev_action
+        if prev is None:
+            return
+        d = float(np.abs(np.asarray(action)[:6] - prev[:6]).max())
+        self._d_n += 1
+        self._d_sum += d
+        if d > self._d_max:
+            self._d_max = d
+        lim = self.ACT_SLEW if self.ACT_SLEW > 0.0 else self.ACT_SLEW_ROT
+        if lim > 0.0 and d > lim:
+            self._d_clip += 1
+
+    def _slew_limit(self, action: np.ndarray) -> np.ndarray:
+        """前 step の指令からの変化量を上限で切る。gripper は触らない。
+
+        入力は _sanitize 済み（[-1, 1] 内）で、前 step もそうなので、
+        前 step の周りに切った結果も [-1, 1] に収まる。再 clip は要らない。
+        """
+        lim = self.ACT_SLEW
+        rot = self.ACT_SLEW_ROT if self.ACT_SLEW_ROT > 0 else lim
+        if lim <= 0.0 and rot <= 0.0:
+            return action
+        prev = self._prev_action
+        if prev is None:            # エピソード先頭。基準が無いので素通し
+            return action
+        a = np.array(action, dtype=np.float32, copy=True).reshape(7)
+        if lim > 0.0:
+            a[:3] = np.clip(a[:3], prev[:3] - lim, prev[:3] + lim)
+        if rot > 0.0:
+            a[3:6] = np.clip(a[3:6], prev[3:6] - rot, prev[3:6] + rot)
         return a
 
     def _fresh_chunk(self, obs: dict[str, np.ndarray]) -> np.ndarray:
@@ -1074,12 +1149,22 @@ class MyPolicy(BasePolicy):
             " (exec は使わない)"
         )
 
+    def _slew_desc(self) -> str:
+        rot = self.ACT_SLEW_ROT if self.ACT_SLEW_ROT > 0 else self.ACT_SLEW
+        if self.ACT_SLEW <= 0.0 and rot <= 0.0:
+            return "off"
+        return (
+            f"xyz={self.ACT_SLEW:g} rot={rot:g} /step"
+            if self.ACT_SLEW > 0.0 else f"rot={rot:g} /step のみ"
+        )
+
     def _clear_episode_state(self) -> None:
         """エピソード境界で捨てる状態。持ち越すと前エピソードの action が
         次エピソードの冒頭に流れ込み、衝突の原因になる。"""
         self._queue.clear()
         self._ens.clear()
         self._step = 0
+        self._prev_action = None
 
     def _record_latency(self, dt: float) -> None:
         """/act の所要時間を記録し、遅い応答をその場で報告する。
@@ -1109,6 +1194,16 @@ class MyPolicy(BasePolicy):
                 f" slow(>{self.SLOW_REQUEST_SEC:g}s)={self._lat_slow}",
                 flush=True,
             )
+        if self._d_n:
+            print(
+                f"[MyPolicy] 前エピソードの |Δaction| (次元 0..5 の最大):"
+                f" mean={self._d_sum / self._d_n:.4f} max={self._d_max:.4f}"
+                f" n={self._d_n} 上限に当たった step={self._d_clip}"
+                f" (slew={self._slew_desc()})",
+                flush=True,
+            )
+        self._d_max = self._d_sum = 0.0
+        self._d_n = self._d_clip = 0
         self._lat_max = self._lat_sum = 0.0
         self._lat_n = self._lat_slow = 0
 

@@ -152,6 +152,25 @@ success 単独では 1.7σ で決定打ではないが、collision・jerk・spar
 0.075 → 0.100 と悪化する。`rot07` 単独も success 横ばい・collision 悪化。
 並進とは別の壊れ方だが、結論は同じで軸を閉じる。
 
+### slew rate 制限（`PARC_ACT_SLEW`）— 未測定・次に試す軸
+
+`ACT_SCALE` は棄却したが、その失敗の中身は「振幅を一律に落とすと、掴む・
+押し込むといった一定量動かないと成立しない操作が成立しなくなる」であって、
+**「優しく動かせば押しのけ量が減る」という仮説は否定されていない**（生き残った
+stove は 50% → 80%、collision 半減）。
+
+そこで速度そのものではなく**変化率だけ**を切る。前 step の指令から動いてよい量に
+上限を設け、次元 0..5 に掛ける（gripper は触らない）。定常速度は落ちないので、
+`ACT_SCALE` の失敗モードが原理的に起きない。頭打ちになるのは前 step から急に
+向きや大きさが変わるときだけで、それは jerk / sparc が測っている量そのもの。
+
+**上限値は当てずっぽうで決めない。** エピソード終了時に、制限を掛ける前の
+`|Δaction|`（次元 0..5 の最大）の平均・最大と、上限に当たった step 数を出す。
+これは `PARC_ACT_SLEW=0`（既定）でも出るので、**まず既定のまま 1 ラウンド回して
+分布を見てから**「平均には当たらず最大には当たる」値を選ぶ。
+
+    [MyPolicy] 前エピソードの |Δaction| (次元 0..5 の最大): mean=... max=... 上限に当たった step=...
+
 ### π0 / π0.5 は閉じた
 
 lerobot 0.4.4 の π0 系は **openpi 互換に差し替えた transformers（custom 4.53）
@@ -385,6 +404,7 @@ ensembling が改善したのは軌道の**滑らかさ**であって、上の�
 | `tools/run_policy_server.sh` | シェル状態に依存せずポリシーサーバーを起動 |
 | `tools/sweep_ensemble.sh` | A/B スイープ（条件ごとに環境変数を消して実行） |
 | `tools/sweep_status.sh` | 走行中スイープの進捗を 1 コマンドで表示 |
+| `tools/respin_parc_env.sh` | **既存 zip の `parc_env` だけ差し替える**（12 GB を作り直さない） |
 | `tools/show_ensemble_results.py` | 結果 JSON から比較表（`--per-task` で内訳） |
 | `tools/train_lora.sh` / `tools/merge_lora.py` | 追加学習とマージ（§27 で使用） |
 | `tools/lowres_transform.py` | 学習画像を評価解像度へ落とす劣化変換（§33） |
@@ -406,6 +426,9 @@ ensembling が改善したのは軌道の**滑らかさ**であって、上の�
 | `PARC_WEIGHTS_DIR` | 未設定 | 別の重みを指す（追加学習の評価用） |
 | `PARC_FLIP180` | `1` | 画像の 180 度回転 |
 | `PARC_LORA_LOWRES` | `0` | **学習時のみ。** 1 で学習画像を評価解像度へ落とす |
+| `PARC_ACT_SCALE` / `_ROT` | `1.0` / 追従 | 振幅スケール。**棄却済み**（§0） |
+| `PARC_ACT_SLEW` | `0`（無効） | 1 step の変化量の上限（次元 0..5）。gripper は対象外 |
+| `PARC_ACT_SLEW_ROT` | `0`（=`SLEW`） | 回転だけ別の上限にしたいとき |
 
 OpenVLA-OFT のときだけ効くもの。`PARC_WEIGHTS_DIR` の `config.json` の
 `model_type` が `openvla` なら自動でそちらの経路に入る。

@@ -48,7 +48,9 @@ def load_module(monkeypatch, **env):
         del sys.modules[key]
     monkeypatch.delenv("PARC_ENSEMBLE", raising=False)
     for name in ("PARC_ENS_H", "PARC_ENS_QUERY", "PARC_ENS_M", "PARC_ENS_GRIPPER",
-                 "PARC_N_EXEC", "PARC_DEBUG_DIR"):
+                 "PARC_N_EXEC", "PARC_DEBUG_DIR",
+                 "PARC_ACT_SCALE", "PARC_ACT_SCALE_ROT",
+                 "PARC_ACT_SLEW", "PARC_ACT_SLEW_ROT"):
         monkeypatch.delenv(name, raising=False)
     for name, value in env.items():
         monkeypatch.setenv(name, str(value))
@@ -68,6 +70,7 @@ def make_policy(mod, chunk_fn):
     p._queue = mod.deque()
     p._ens = mod.deque()
     p._step = 0
+    p._prev_action = None
     p.torch = p.device = p.preprocessor = p.postprocessor = None
     p.state_dim = 8
     p.key_main, p.key_wrist = p.KEY_MAIN, p.KEY_WRIST
@@ -75,6 +78,8 @@ def make_policy(mod, chunk_fn):
     p._warming = True          # レイテンシ集計とデバッグダンプを黙らせる
     p._lat_max = p._lat_sum = 0.0
     p._lat_n = p._lat_slow = 0
+    p._d_max = p._d_sum = 0.0
+    p._d_n = p._d_clip = 0
     p.model = None
     p.calls = 0
 
@@ -306,3 +311,144 @@ def test_empty_chunk_is_rejected(monkeypatch):
 
     with pytest.raises(RuntimeError, match="空の action"):
         p.get_action(OBS)
+
+
+# --- slew rate 制限 ---------------------------------------------------------
+#
+# ACT_SCALE との違いを守るためのテスト群である。ACT_SCALE は定常速度を落とす
+# ので「掴めない」失敗を生んだ（公開 4 タスク中 3 つが 0）。slew 制限は跳ねだけ
+# 削り、定常速度は保つ。その性質そのものを固定する。
+
+
+def step_chunks(values):
+    """i 回目の推論が定数 values[i] を返すチャンク。跳ねを作るのに使う。"""
+    return lambda i: np.full((50, 7), values[min(i, len(values) - 1)], np.float32)
+
+
+def test_slew_is_off_by_default(monkeypatch):
+    """未測定のつまみを既定で入れない。0.304 の構成を黙って変えないこと。"""
+    cfg = load_module(monkeypatch).MyPolicy
+
+    assert cfg.ACT_SLEW == 0.0
+    assert cfg.ACT_SLEW_ROT == 0.0
+
+
+def test_slew_caps_the_jump_between_steps(monkeypatch):
+    """0 -> 0.8 の跳ねが 0.1 刻みに均される。"""
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1, PARC_ACT_SLEW=0.1)
+    p = make_policy(mod, step_chunks([0.0, 0.8, 0.8, 0.8, 0.8]))
+
+    out = drive(p, 5)
+    assert out[0] == pytest.approx(0.0)          # 先頭は基準が無いので素通し
+    assert out[1] == pytest.approx(0.1)
+    assert out[2] == pytest.approx(0.2)
+    assert out[3] == pytest.approx(0.3)
+
+
+def test_slew_does_not_slow_a_steady_command(monkeypatch):
+    """定常速度は落とさない。ACT_SCALE との決定的な違い。"""
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1, PARC_ACT_SLEW=0.1)
+    p = make_policy(mod, lambda i: np.full((50, 7), 0.05, np.float32))
+
+    assert drive(p, 6) == pytest.approx([0.05] * 6)
+
+
+def test_slew_reaches_the_commanded_value_and_stays(monkeypatch):
+    """頭打ちは過渡だけ。数 step 後には指令値に追いつく（振幅は失わない）。"""
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1, PARC_ACT_SLEW=0.1)
+    p = make_policy(mod, step_chunks([0.0, 0.35]))
+
+    out = drive(p, 8)
+    assert out[4] == pytest.approx(0.35)
+    assert out[-1] == pytest.approx(0.35)
+
+
+def test_slew_leaves_the_gripper_alone(monkeypatch):
+    """開閉は二値。遅らせると掴み損なう。"""
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1, PARC_ACT_SLEW=0.05)
+    p = make_policy(mod, step_chunks([-1.0, 1.0]))
+
+    p.get_action(OBS)
+    a = p.get_action(OBS)
+    assert a[6] == pytest.approx(1.0)            # gripper は一気に反転する
+    assert a[0] == pytest.approx(-0.95)          # 並進は 0.05 しか動かない
+
+
+def test_slew_rot_can_differ_from_translation(monkeypatch):
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1,
+                      PARC_ACT_SLEW=0.1, PARC_ACT_SLEW_ROT=0.02)
+    p = make_policy(mod, step_chunks([0.0, 0.5]))
+
+    p.get_action(OBS)
+    a = p.get_action(OBS)
+    assert a[:3] == pytest.approx([0.1] * 3)
+    assert a[3:6] == pytest.approx([0.02] * 3)
+
+
+def test_slew_rot_alone_leaves_translation_free(monkeypatch):
+    """PARC_ACT_SLEW=0 でも回転だけ制限できる。"""
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1, PARC_ACT_SLEW_ROT=0.02)
+    p = make_policy(mod, step_chunks([0.0, 0.5]))
+
+    p.get_action(OBS)
+    a = p.get_action(OBS)
+    assert a[:3] == pytest.approx([0.5] * 3)
+    assert a[3:6] == pytest.approx([0.02] * 3)
+
+
+def test_slew_does_not_carry_across_episodes(monkeypatch):
+    """前エピソード末尾の指令が次の先頭を縛らない（reset で基準を捨てる）。"""
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1, PARC_ACT_SLEW=0.1)
+    p = make_policy(mod, step_chunks([-0.9, 0.9]))
+
+    drive(p, 3)
+    p.reset("next")
+    assert p._prev_action is None
+    assert p.get_action(OBS)[0] == pytest.approx(0.9)
+
+
+def test_slew_output_stays_in_range(monkeypatch):
+    """_sanitize の後に掛かるが、範囲は壊さない。"""
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=1, PARC_ACT_SLEW=0.1)
+    p = make_policy(mod, lambda i: np.full((50, 7), 5.0, np.float32))
+
+    for _ in range(5):
+        a = p.get_action(OBS)
+        assert a.shape == (7,) and a.dtype == np.float32
+        assert a.min() >= -1.0 and a.max() <= 1.0
+
+
+def test_delta_tracking_measures_the_raw_jump(monkeypatch):
+    """上限を選ぶための計測。記録するのは制限を掛ける前の変化量。"""
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1, PARC_ACT_SLEW=0.1)
+    p = make_policy(mod, step_chunks([0.0, 0.5, 0.5]))
+    p._warming = False
+
+    drive(p, 3)
+
+    assert p._d_n == 2                       # 先頭 step は基準が無いので数えない
+    assert p._d_max == pytest.approx(0.5)    # 0.1 に切った後の値ではない
+    assert p._d_clip == 2
+
+
+def test_delta_tracking_runs_with_the_limiter_off(monkeypatch):
+    """制限を入れる前に分布だけ見たいので、無効でも計測は回る。"""
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1)
+    p = make_policy(mod, step_chunks([0.0, 0.3, 0.3]))
+    p._warming = False
+
+    drive(p, 3)
+
+    assert p._d_n == 2 and p._d_clip == 0
+    assert p._d_max == pytest.approx(0.3)
+
+
+def test_delta_tracking_resets_between_episodes(monkeypatch):
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1)
+    p = make_policy(mod, step_chunks([0.0, 0.3]))
+    p._warming = False
+
+    drive(p, 3)
+    p.reset("next")
+
+    assert (p._d_n, p._d_clip, p._d_max, p._d_sum) == (0, 0, 0.0, 0.0)
