@@ -171,9 +171,23 @@ LOCK="$ROOT/.sweep.lock"
 PIDFILE="$ROOT/.sweep.pid"
 exec 9>>"$LOCK" || true          # >> にする。> だと保持者の PID を消してしまう
 if command -v flock >/dev/null 2>&1; then
+    # PARC_SWEEP_WAIT=1 なら、走っているラウンドが終わるまで待って続きを始める。
+    #
+    # 既定は即中止だが、そのせいで「終わったか確かめて、空いていたら起動する」
+    # を手で繰り返すことになる。確認と起動を続けて貼ると、確認の結果を読む前に
+    # 起動が走って弾かれる（実際に 2 回続けて起きた）。並べて投げておけるほうが
+    # 安全である。
+    if [ "${PARC_SWEEP_WAIT:-0}" != "0" ] && ! flock -n 9; then
+        holder="$(cat "$PIDFILE" 2>/dev/null || true)"
+        echo "[sweep] 別のスイープ (pid=${holder:-?}) が動いている。空くまで待つ。"
+        echo "        待たずに中止させるには PARC_SWEEP_WAIT を外すこと。"
+        flock 9
+        echo "[sweep] ロックを取得した。開始する。"
+    fi
     if ! flock -n 9; then
         holder="$(cat "$PIDFILE" 2>/dev/null || true)"
         echo "[sweep] 既に別のスイープが動いている。中止する。"
+        echo "        終わり次第これを始めたいなら: PARC_SWEEP_WAIT=1 を付ける"
         if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
             echo "    pid=$holder  $(tr '\0' ' ' < "/proc/$holder/cmdline" 2>/dev/null | cut -c1-90)"
             # プロセスグループごと送る。`kill $holder` だと bash 本体にしか
