@@ -105,13 +105,20 @@ CLEAR=(); for k in "${KNOBS[@]}"; do CLEAR+=(-u "$k"); done
 LABELS=""
 for spec in $CONDS; do LABELS="$LABELS ${spec%%:*}"; done
 
+# 条件の説明。共通部があるときの「つまみ無し」は嘘になる（共通部は効いている）。
+cond_desc() {
+    if [ -n "$1" ]; then echo "$1"
+    elif [ -n "$COMMON" ]; then echo "（共通部のみ）"
+    else echo "（つまみ無し = 現行の既定）"; fi
+}
+
 echo "======================================================"
 echo " temporal ensembling スイープ"
 echo "   タスク      : $TASK"
 echo "   条件        :"
 for spec in $CONDS; do
     label="${spec%%:*}"; assign="${spec#*:}"
-    printf '                 %-8s %s\n' "$label" "${assign:-（つまみ無し = 現行の既定）}"
+    printf '                 %-8s %s\n' "$label" "$(cond_desc "${spec#*:}")"
 done
 [ -n "$COMMON" ] && echo "   全条件共通  : $COMMON"
 echo "   エピソード  : $EPISODES / 条件   最大ステップ: $MAX_STEPS   seed: $SEED"
@@ -230,7 +237,7 @@ for spec in $CONDS; do
     OUT="results/${PREFIX}_${label}"
     SRVLOG="logs/server_${PREFIX}_${label}.log"
     echo
-    echo "=== $label : ${assign:-（つまみ無し）} ==============================="
+    echo "=== $label : $(cond_desc "$assign") ==============================="
     rm -rf "$OUT"; mkdir -p "$OUT"
 
     require_port_free || exit 1
@@ -271,8 +278,20 @@ for spec in $CONDS; do
 
     # サーバーが実際にその設定で立ったかを起動ログで確かめる。環境変数の
     # 渡し損ねは静かに起きて、条件が違うことに気づけないまま数字が出る。
-    ens_line="$(grep -o 'ensemble=.*' "$SRVLOG" | head -1)"
-    case "$assign" in
+    #
+    # 拾う行を間違えないこと。run_policy_server.sh が先に
+    #   [run] ensemble=1  h=8  query=1(既定)  m=0.01(既定)
+    # を出すので、`grep -o 'ensemble=.*' | head -1` はそちらに当たる。この行は
+    # 「シェルが何を渡したか」であって「サーバーが何で立ったか」ではないうえ、
+    # 値が `1` なので下の off/on どちらのパターンにも一致せず、**検査が常に
+    # 素通りしていた**。誤検知が出ないので、壊れていることに気づけなかった。
+    # サーバー自身が出す [MyPolicy] の行だけを見る。
+    ens_line="$(grep -oE '^\[MyPolicy\][[:space:]]+ensemble=.*' "$SRVLOG" \
+                | head -1 | sed 's/.*ensemble=/ensemble=/')"
+    # 判定は共通部と条件を合わせた「実際に効く設定」に対して行う。条件側だけ
+    # を見ると、PARC_SWEEP_COMMON で ensembling を掛けたラウンドの対照条件が
+    # 「つまみ無しのはずなのに on」と誤検知される。
+    case "$COMMON,$assign" in
         *PARC_ENSEMBLE=1*)
             if [ "${ens_line#ensemble=off}" != "$ens_line" ]; then
                 echo "[sweep] $label は ensembling を要求したのにサーバーは off で起動した。"
@@ -281,7 +300,7 @@ for spec in $CONDS; do
             fi ;;
         *)
             if [ "${ens_line#ensemble=on}" != "$ens_line" ]; then
-                echo "[sweep] $label はつまみ無しのはずなのに ensembling が有効になっている。"
+                echo "[sweep] $label は ensembling を要求していないのに on で起動した。"
                 echo "        起動ログ: $ens_line  （シェルに PARC_ENSEMBLE が残っていないか）"
                 cleanup; SRV=""; exit 1
             fi ;;
