@@ -69,6 +69,21 @@ fi
 #   h16new  m を負にして新しい予測を重く見る。上と同じ理由の別の当て方
 CONDS="${PARC_SWEEP_CONDS:-base: h16:PARC_ENSEMBLE=1 h8:PARC_ENSEMBLE=1,PARC_ENS_H=8 h16new:PARC_ENSEMBLE=1,PARC_ENS_M=-0.1}"
 
+# 全条件に共通で掛ける設定。書式は条件と同じ "KEY=VAL,KEY=VAL"。
+#
+# ラウンド全体の設定（どの重みを使うか等）を条件ごとに書き写さないためのもの。
+# 下の CLEAR が PARC_WEIGHTS_DIR を含む全つまみを毎回消すので、シェルで
+# export しても条件には届かない。条件文字列に毎回足すのは書き忘れが起きる:
+#
+#   OFT のラウンドで PARC_WEIGHTS_DIR を落とすと submission/model_weights
+#   （SmolVLA）が読まれる。parc-oft の python なら import で落ちて気づけるが、
+#   parc-policy なら**黙って SmolVLA を評価して、それらしい数字を出す**。
+#
+#   PARC_SWEEP_COMMON=PARC_WEIGHTS_DIR=$HOME/parc_models/oft_libero_plus
+#
+# 条件側の指定が優先される（env は後勝ちなので、共通 -> 条件 の順に並べる）。
+COMMON="${PARC_SWEEP_COMMON:-}"
+
 # 条件ごとに必ず消す。前の条件の値が残っていると、意図と違う設定で
 # 評価してしまい、数字が間違っていることに気づけない。
 #
@@ -98,6 +113,7 @@ for spec in $CONDS; do
     label="${spec%%:*}"; assign="${spec#*:}"
     printf '                 %-8s %s\n' "$label" "${assign:-（つまみ無し = 現行の既定）}"
 done
+[ -n "$COMMON" ] && echo "   全条件共通  : $COMMON"
 echo "   エピソード  : $EPISODES / 条件   最大ステップ: $MAX_STEPS   seed: $SEED"
 echo "   ポート      : $PORT"
 echo "   出力        : results/${PREFIX}_<ラベル>/  ログ: logs/"
@@ -134,6 +150,7 @@ if command -v flock >/dev/null 2>&1; then
 fi
 
 SRV=""
+ROUND_SIG=""          # このラウンドが読んだモデル。条件をまたいで変わってはいけない
 cleanup() {
     rm -f "${PIDFILE:-}" 2>/dev/null
     if [ -n "$SRV" ] && kill -0 "$SRV" 2>/dev/null; then
@@ -218,7 +235,7 @@ for spec in $CONDS; do
 
     require_port_free || exit 1
     # shellcheck disable=SC2086
-    env "${CLEAR[@]}" ${assign//,/ } PARC_PORT="$PORT" \
+    env "${CLEAR[@]}" ${COMMON//,/ } ${assign//,/ } PARC_PORT="$PORT" \
         bash tools/run_policy_server.sh > "$SRVLOG" 2>&1 &
     SRV=$!
 
@@ -269,6 +286,22 @@ for spec in $CONDS; do
                 cleanup; SRV=""; exit 1
             fi ;;
     esac
+
+    # 全条件が同じモデル・同じ重みを読んだことを確かめる。ラウンドの途中で
+    # 混ざると、表は普通に出るのに比較になっていない（つまみの効果とモデルの
+    # 差が混ざる）。起動ログでしか検出できない。
+    sig="$(grep -oE '^\[MyPolicy\] [^ ]+ ready' "$SRVLOG" | head -1 | awk '{print $2}')"
+    sig="$sig@$(grep -oE '^\[MyPolicy\] weights: [^ ]+' "$SRVLOG" | head -1 | awk '{print $3}')"
+    if [ -z "$ROUND_SIG" ]; then
+        ROUND_SIG="$sig"
+        echo "[sweep] このラウンドのモデル: $sig"
+    elif [ "$sig" != "$ROUND_SIG" ]; then
+        echo "[sweep] $label は他の条件と違うモデルを読んでいる。"
+        echo "        最初の条件: $ROUND_SIG"
+        echo "        この条件  : $sig"
+        echo "        比較にならないので中止する。"
+        cleanup; SRV=""; exit 1
+    fi
 
     python -m pipeline --server-url "http://127.0.0.1:$PORT" --track track1 \
         ${TASK_ARGS[@]+"${TASK_ARGS[@]}"} \
