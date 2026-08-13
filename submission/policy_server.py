@@ -278,6 +278,32 @@ class MyPolicy(BasePolicy):
     #: 回転だけ別の上限にしたい場合。0 以下なら ACT_SLEW に従う。
     ACT_SLEW_ROT = _env_float("PARC_ACT_SLEW_ROT", 0.0)
 
+    # --- 把持に失敗したらグリッパーを開き直す -------------------------------
+    #: BEHAVIOR-1K Challenge 2025 の 1 位解法が汎用の補正ルールとして入れたもの
+    #: （arXiv 2512.06951）。彼らは原因まで書いている:
+    #:
+    #:   クロスタスク学習だけではデモのバイアスを克服できず、ロボットはしばしば
+    #:   把持を外し、グリッパーを閉じたまま、リトライしなかった。学習データに
+    #:   「開き直す」リカバリのデモが無いためである。自動で開くヒューリスティックを
+    #:   入れたところ、頑健なリカバリ挙動が観測された。
+    #:
+    #: 我々の失敗の記述そのものである。採点 8 本のうち 4 本が 300 step を使い
+    #: 切って終わっており、「詰まって、やり直さない」形をしている。そして
+    #: **成功 1 本は 0.06〜0.10** で、つまみで動かしてきた幅の 2〜3 倍ある。
+    #:
+    #: 判定は「閉じろと指令しているのに指がほぼ全閉 = 何も掴んでいない」。
+    #: 物体を掴んでいれば指は物体の幅で止まるので、そこに分離があるはず。
+    #: **あるかどうかは測って確かめる**（下の計測は既定でも常時回る）。
+    #:
+    #: 単位は指の開き（`|qpos[0]| + |qpos[1]|`, m）。0 で無効。
+    GRIP_RETRY = _env_float("PARC_GRIP_RETRY", 0.0)
+    #: 何 step 続けて閉指令が出たら判定するか。閉じ始めの過渡で誤検出しない用
+    GRIP_RETRY_AFTER = _env_int("PARC_GRIP_RETRY_AFTER", 5, minimum=1)
+    #: 開き直す step 数
+    GRIP_RETRY_OPEN = _env_int("PARC_GRIP_RETRY_OPEN", 8, minimum=1)
+    #: 1 エピソードあたりの上限。振動して 300 step 溶かすのを防ぐ
+    GRIP_RETRY_MAX = _env_int("PARC_GRIP_RETRY_MAX", 3, minimum=0)
+
     #: config.json の chunk_size / n_action_steps に一致させる
     ACTION_CHUNK_SIZE = 50
 
@@ -427,6 +453,11 @@ class MyPolicy(BasePolicy):
         self._d_xyz: list[float] = []
         self._d_rot: list[float] = []
         self._d_clip = 0
+        # 把持失敗の判定用。_grip_seen は制限が無効でも溜まる
+        self._grip_seen: list[float] = []
+        self._grip_close_run = 0
+        self._grip_open_left = 0
+        self._grip_retries = 0
         self.policy_type = "smolvla"   # _load_model が config から上書きする
         self.oft = None                # OpenVLA-OFT のときだけ入る
         self.model = self._load_model()
@@ -1046,6 +1077,7 @@ class MyPolicy(BasePolicy):
         if not self._warming:
             self._track_delta(action)
         action = self._slew_limit(action)
+        action = self._grip_retry(obs, action)
         self._prev_action = action
         if not self._warming:
             self._record_latency(time.perf_counter() - t0)
@@ -1063,6 +1095,63 @@ class MyPolicy(BasePolicy):
         a[:3] *= self.ACT_SCALE
         a[3:6] *= rot
         return a
+
+    @staticmethod
+    def _grip_opening(obs: dict) -> float | None:
+        """指の開き。robosuite の Panda は左右で符号が逆なので絶対値の和を取る。
+
+        統計上の値域は各指 ±0.042（§ 冒頭の normalizer の読み）なので、
+        全開で 0.08 前後、全閉で 0 付近になる。
+        """
+        q = obs.get("robot0_gripper_qpos")
+        if q is None:
+            return None
+        q = np.asarray(q, dtype=np.float32).reshape(-1)
+        if q.size < 2:
+            return None
+        return float(abs(float(q[0])) + abs(float(q[1])))
+
+    def _grip_retry(self, obs: dict, action: np.ndarray) -> np.ndarray:
+        """閉指令が続いているのに指が閉じ切っていたら、開き直してやり直させる。
+
+        計測（`_grip_seen`）は**制限が無効でも常に回る**。閾値を当てずっぽうで
+        決めないためで、slew のときと同じやり方である。掴めているときと空振りの
+        ときで開きが分離していなければ、この案自体が成立しない。
+        """
+        opening = self._grip_opening(obs)
+        if opening is None:
+            return action
+        closing = float(action[6]) > 0.0        # 環境の規約: +1=閉じる / -1=開く
+
+        if not self._warming and closing:
+            self._grip_seen.append(opening)
+
+        if self.GRIP_RETRY <= 0.0:
+            return action
+
+        def opened() -> np.ndarray:
+            a = np.array(action, dtype=np.float32, copy=True).reshape(7)
+            a[6] = -1.0
+            return a
+
+        if self._grip_open_left > 0:            # 開き直している最中
+            self._grip_open_left -= 1
+            return opened()
+
+        self._grip_close_run = self._grip_close_run + 1 if closing else 0
+        if (closing
+                and self._grip_close_run >= self.GRIP_RETRY_AFTER
+                and opening < self.GRIP_RETRY
+                and self._grip_retries < self.GRIP_RETRY_MAX):
+            self._grip_retries += 1
+            self._grip_close_run = 0
+            self._grip_open_left = self.GRIP_RETRY_OPEN - 1
+            if not self._warming:
+                print(f"[MyPolicy] 把持失敗と判定（開き {opening:.4f}"
+                      f" < {self.GRIP_RETRY:g}）。{self.GRIP_RETRY_OPEN} step 開き直す"
+                      f"（{self._grip_retries}/{self.GRIP_RETRY_MAX} 回目）", flush=True)
+            return opened()
+        return action
 
     def _track_delta(self, action: np.ndarray) -> None:
         """slew 制限を掛ける**前**の変化量を記録する。上限値を選ぶための計測。
@@ -1217,6 +1306,20 @@ class MyPolicy(BasePolicy):
                 f"\n[MyPolicy]   {self._delta_desc('rot', self._d_rot)}",
                 flush=True,
             )
+        if self._grip_seen:
+            v = np.asarray(self._grip_seen, dtype=np.float64)
+            p10, p50 = np.percentile(v, [10, 50])
+            print(
+                f"[MyPolicy] 前エピソードの gripper: 閉指令 n={v.size}"
+                f" 開き min={v.min():.4f} p10={p10:.4f} p50={p50:.4f}"
+                f" max={v.max():.4f} 開き直し={self._grip_retries} 回"
+                f" (retry={self.GRIP_RETRY:g})",
+                flush=True,
+            )
+        self._grip_seen = []
+        self._grip_close_run = 0
+        self._grip_open_left = 0
+        self._grip_retries = 0
         self._d_xyz = []
         self._d_rot = []
         self._d_clip = 0

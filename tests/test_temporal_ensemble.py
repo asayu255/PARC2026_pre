@@ -50,7 +50,9 @@ def load_module(monkeypatch, **env):
     for name in ("PARC_ENS_H", "PARC_ENS_QUERY", "PARC_ENS_M", "PARC_ENS_GRIPPER",
                  "PARC_N_EXEC", "PARC_DEBUG_DIR",
                  "PARC_ACT_SCALE", "PARC_ACT_SCALE_ROT",
-                 "PARC_ACT_SLEW", "PARC_ACT_SLEW_ROT"):
+                 "PARC_ACT_SLEW", "PARC_ACT_SLEW_ROT", "PARC_GRIP_RETRY",
+                 "PARC_GRIP_RETRY_AFTER", "PARC_GRIP_RETRY_OPEN",
+                 "PARC_GRIP_RETRY_MAX"):
         monkeypatch.delenv(name, raising=False)
     for name, value in env.items():
         monkeypatch.setenv(name, str(value))
@@ -81,6 +83,10 @@ def make_policy(mod, chunk_fn):
     p._d_xyz = []
     p._d_rot = []
     p._d_clip = 0
+    p._grip_seen = []
+    p._grip_close_run = 0
+    p._grip_open_left = 0
+    p._grip_retries = 0
     p.model = None
     p.calls = 0
 
@@ -500,3 +506,119 @@ def test_delta_summary_reports_percentiles(monkeypatch):
     assert "p50=0.0100" in line
     assert "max=0.2000" in line
     assert "p90=" in line and "p99=" in line
+
+
+# --- 把持失敗後の開き直し ---------------------------------------------------
+#
+# BEHAVIOR-1K Challenge 2025 の 1 位が汎用の補正ルールとして入れたもの。
+# 「掴み損なって閉じたまま、やり直さない」を検出して開かせる。
+
+
+def grip(qpos):
+    o = dict(OBS)
+    o["robot0_gripper_qpos"] = np.array(qpos, np.float64)
+    return o
+
+
+def drive_obs(policy, obs, steps):
+    return [float(policy.get_action(obs)[6]) for _ in range(steps)]
+
+
+def closing_chunks(i):
+    """常に閉じろと指令し続けるチャンク（環境規約で +1 = 閉じる）。"""
+    a = np.zeros((50, 7), np.float32)
+    a[:, 6] = 1.0
+    return a
+
+
+def test_grip_retry_is_off_by_default(monkeypatch):
+    """未測定のつまみを既定で入れない。0.304 の構成を黙って変えないこと。"""
+    cfg = load_module(monkeypatch).MyPolicy
+    assert cfg.GRIP_RETRY == 0.0
+
+
+def test_opening_is_the_sum_of_both_fingers(monkeypatch):
+    """robosuite の Panda は左右で符号が逆。絶対値の和で開きを測る。"""
+    mod = load_module(monkeypatch)
+    assert mod.MyPolicy._grip_opening(grip([0.04, -0.04])) == pytest.approx(0.08)
+    assert mod.MyPolicy._grip_opening(grip([0.001, -0.001])) == pytest.approx(0.002)
+    assert mod.MyPolicy._grip_opening({}) is None
+
+
+def test_empty_grasp_forces_the_gripper_open(monkeypatch):
+    """閉指令が続いて指が閉じ切っていたら開き直す。"""
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1,
+                      PARC_GRIP_RETRY=0.02, PARC_GRIP_RETRY_AFTER=3,
+                      PARC_GRIP_RETRY_OPEN=4)
+    p = make_policy(mod, closing_chunks)
+
+    out = drive_obs(p, grip([0.001, -0.001]), 7)
+
+    assert out[:2] == [1.0, 1.0]              # 過渡では手を出さない
+    assert out[2:6] == [-1.0] * 4             # 3 step 目で判定して 4 step 開く
+    assert out[6] == 1.0                      # その後は方策に戻す
+    assert p._grip_retries == 1
+
+
+def test_a_held_object_is_left_alone(monkeypatch):
+    """物体を掴んでいれば指は物体の幅で止まる。そこには介入しない。"""
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1,
+                      PARC_GRIP_RETRY=0.02, PARC_GRIP_RETRY_AFTER=3)
+    p = make_policy(mod, closing_chunks)
+
+    assert drive_obs(p, grip([0.015, -0.015]), 10) == [1.0] * 10
+    assert p._grip_retries == 0
+
+
+def test_retries_are_capped_per_episode(monkeypatch):
+    """振動して 300 step 溶かすのを防ぐ。"""
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1,
+                      PARC_GRIP_RETRY=0.02, PARC_GRIP_RETRY_AFTER=2,
+                      PARC_GRIP_RETRY_OPEN=2, PARC_GRIP_RETRY_MAX=2)
+    p = make_policy(mod, closing_chunks)
+
+    drive_obs(p, grip([0.001, -0.001]), 60)
+
+    assert p._grip_retries == 2
+
+
+def test_measurement_runs_even_when_disabled(monkeypatch):
+    """閾値を決めるための計測は、制限が無効でも回る（slew と同じ作法）。"""
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1)
+    p = make_policy(mod, closing_chunks)
+    p._warming = False
+
+    drive_obs(p, grip([0.001, -0.001]), 5)
+
+    assert len(p._grip_seen) == 5
+    assert p._grip_seen[0] == pytest.approx(0.002)
+    assert p._grip_retries == 0                # 無効なので介入はしない
+
+
+def test_open_commands_are_not_counted(monkeypatch):
+    """開指令中の開きは判定材料にしない（閉じていないのは当たり前）。"""
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1)
+
+    def opening_chunks(i):
+        a = np.zeros((50, 7), np.float32)
+        a[:, 6] = -1.0
+        return a
+
+    p = make_policy(mod, opening_chunks)
+    p._warming = False
+    drive_obs(p, grip([0.001, -0.001]), 5)
+
+    assert p._grip_seen == []
+
+
+def test_grip_state_resets_between_episodes(monkeypatch):
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1,
+                      PARC_GRIP_RETRY=0.02, PARC_GRIP_RETRY_AFTER=2)
+    p = make_policy(mod, closing_chunks)
+    p._warming = False
+    drive_obs(p, grip([0.001, -0.001]), 6)
+
+    p.reset("next")
+
+    assert p._grip_seen == [] and p._grip_retries == 0
+    assert p._grip_close_run == 0 and p._grip_open_left == 0
