@@ -52,7 +52,7 @@ def load_module(monkeypatch, **env):
                  "PARC_ACT_SCALE", "PARC_ACT_SCALE_ROT",
                  "PARC_ACT_SLEW", "PARC_ACT_SLEW_ROT", "PARC_GRIP_RETRY",
                  "PARC_GRIP_RETRY_AFTER", "PARC_GRIP_RETRY_OPEN",
-                 "PARC_GRIP_RETRY_MAX"):
+                 "PARC_GRIP_RETRY_MAX", "PARC_GRIP_RETRY_MIN_STEP"):
         monkeypatch.delenv(name, raising=False)
     for name, value in env.items():
         monkeypatch.setenv(name, str(value))
@@ -83,6 +83,7 @@ def make_policy(mod, chunk_fn):
     p._d_xyz = []
     p._d_rot = []
     p._d_clip = 0
+    p._ep_step = 0
     p._grip_seen = []
     p._grip_close_run = 0
     p._grip_open_left = 0
@@ -622,3 +623,43 @@ def test_grip_state_resets_between_episodes(monkeypatch):
 
     assert p._grip_seen == [] and p._grip_retries == 0
     assert p._grip_close_run == 0 and p._grip_open_left == 0
+
+
+def test_retry_can_be_delayed_to_late_in_the_episode(monkeypatch):
+    """物体の幅はタスクで違う。閾値を踏み外しても、後半に限れば壊す相手が減る。
+
+    公開 4 タスクの実測では成功は 82〜187 step で終わり、空振りのまま
+    握り続けた本は 300 step 使い切った。
+    """
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1,
+                      PARC_GRIP_RETRY=0.0025, PARC_GRIP_RETRY_AFTER=2,
+                      PARC_GRIP_RETRY_MIN_STEP=10)
+    p = make_policy(mod, closing_chunks)
+
+    out = drive_obs(p, grip([0.0005, -0.0005]), 12)
+
+    assert out[:10] == [1.0] * 10              # 10 step 目までは手を出さない
+    assert out[10] == -1.0                     # そこを越えてから発火
+    assert p._grip_retries == 1
+
+
+def test_the_measured_threshold_separates_the_observed_episodes(monkeypatch):
+    """公開 4 タスク 11 本の実測値。0.0025 がこの標本を完全に分離する。
+
+    成功: 0.0037 0.0050 0.0536 0.0608 0.0630 0.0640 0.0641
+    失敗: 0.0018（空振り）/ 0.0425（掴めているが別要因で失敗）
+
+    余裕は 0.0018 と 0.0037 の間の 2 mm しかない。ここを動かすときは
+    必ず測り直すこと。
+    """
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1,
+                      PARC_GRIP_RETRY=0.0025, PARC_GRIP_RETRY_AFTER=2)
+
+    def fires(opening):
+        p = make_policy(mod, closing_chunks)
+        drive_obs(p, grip([opening / 2, -opening / 2]), 5)
+        return p._grip_retries > 0
+
+    assert fires(0.0018)                                   # 空振り -> 発火
+    for ok in (0.0037, 0.0050, 0.0425, 0.0536, 0.0641):    # 掴めている -> 発火しない
+        assert not fires(ok), ok

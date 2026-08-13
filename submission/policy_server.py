@@ -303,6 +303,16 @@ class MyPolicy(BasePolicy):
     GRIP_RETRY_OPEN = _env_int("PARC_GRIP_RETRY_OPEN", 8, minimum=1)
     #: 1 エピソードあたりの上限。振動して 300 step 溶かすのを防ぐ
     GRIP_RETRY_MAX = _env_int("PARC_GRIP_RETRY_MAX", 3, minimum=0)
+    #: この step より前では発火しない（0 で無効）。
+    #:
+    #: 物体の幅はタスクで大きく違う。公開 4 タスクの実測では箱物が 0.053〜0.064、
+    #: **ボウルの縁が 0.0037〜0.0050** で、空振り（0.0018）との差は 2 mm しかない。
+    #: 採点タスクは別物なので、もっと薄い物体がある可能性を排除できない。
+    #:
+    #: 一方、成功した本は 82〜187 step で終わっている。後半でしか発火させなければ、
+    #: 閾値を踏み外しても壊す相手が「どのみち失敗する本」に寄る。閾値と独立な
+    #: 二重の歯止めとして効く。
+    GRIP_RETRY_MIN_STEP = _env_int("PARC_GRIP_RETRY_MIN_STEP", 0, minimum=0)
 
     #: config.json の chunk_size / n_action_steps に一致させる
     ACTION_CHUNK_SIZE = 50
@@ -454,6 +464,7 @@ class MyPolicy(BasePolicy):
         self._d_rot: list[float] = []
         self._d_clip = 0
         # 把持失敗の判定用。_grip_seen は制限が無効でも溜まる
+        self._ep_step = 0
         self._grip_seen: list[float] = []
         self._grip_close_run = 0
         self._grip_open_left = 0
@@ -1077,6 +1088,7 @@ class MyPolicy(BasePolicy):
         if not self._warming:
             self._track_delta(action)
         action = self._slew_limit(action)
+        self._ep_step += 1
         action = self._grip_retry(obs, action)
         self._prev_action = action
         if not self._warming:
@@ -1126,7 +1138,7 @@ class MyPolicy(BasePolicy):
         if not self._warming and closing:
             self._grip_seen.append(opening)
 
-        if self.GRIP_RETRY <= 0.0:
+        if self.GRIP_RETRY <= 0.0 or self._ep_step < self.GRIP_RETRY_MIN_STEP:
             return action
 
         def opened() -> np.ndarray:
@@ -1316,6 +1328,7 @@ class MyPolicy(BasePolicy):
                 f" (retry={self.GRIP_RETRY:g})",
                 flush=True,
             )
+        self._ep_step = 0
         self._grip_seen = []
         self._grip_close_run = 0
         self._grip_open_left = 0
