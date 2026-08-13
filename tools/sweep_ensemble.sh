@@ -394,6 +394,9 @@ for spec in $CONDS; do
     # |Δaction| は slew の上限を選ぶための材料。制限が無効でも出る。
     # 内訳（xyz / rot）は続く 2 行なので -A 2。見出し行だけ拾っても意味が無い。
     grep -A 2 'Δaction' "$SRVLOG" | tail -9 | sed 's/^/    /'
+    # 指の開きは把持失敗の判定閾値を選ぶための材料。これも制限が無効でも出る。
+    # レイテンシ行と並べる（そちらの n= が step 数 = 成否そのもの）。
+    grep -E 'レイテンシ|gripper:' "$SRVLOG" | tail -8 | sed 's/^/    /'
 
     cleanup; SRV=""
     for _ in $(seq 1 30); do health_ok || break; sleep 1; done
