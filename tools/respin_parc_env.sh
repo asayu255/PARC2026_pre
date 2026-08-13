@@ -21,10 +21,19 @@ cd "$ROOT"
 SRC="${1:-}"
 DST="${2:-}"
 ENVSPEC="${3:-}"
+# 区切り文字。**値の中にカンマが入る変数がある**ので、外から替えられる必要がある。
+# `PARC_OFT_TTA_SCALES=0.875,0.925,0.825` を既定のカンマ区切りで渡すと、
+# 倍率 3 つが別々の行に散って parc_env が壊れる（しかも壊れたまま PASS しうる）。
+#   PARC_RESPIN_SEP=';' bash tools/respin_parc_env.sh a.zip b.zip "A=1;B=0.9,0.8"
+SEP="${PARC_RESPIN_SEP:-,}"
 if [ -z "$SRC" ] || [ -z "$DST" ] || [ -z "$ENVSPEC" ]; then
     echo 'usage: bash tools/respin_parc_env.sh <src.zip> <dst.zip> "KEY=VAL,KEY=VAL"' >&2
+    echo '  値にカンマを含むとき: PARC_RESPIN_SEP=";" ... "KEY=VAL;KEY=A,B,C"' >&2
     exit 2
 fi
+case "$ENVSPEC" in
+    *" "*) echo "ERROR: 区切りに空白は使えない（parc_env は 1 行 1 変数）: $ENVSPEC" >&2; exit 2 ;;
+esac
 [ -f "$SRC" ] || { echo "ERROR: $SRC が無い" >&2; exit 1; }
 [ "$SRC" = "$DST" ] && { echo "ERROR: 元と同じ名前にはできない" >&2; exit 1; }
 
@@ -37,12 +46,24 @@ cp -f "$SRC" "$DST"
 # 置きたいので、一時ディレクトリの中で作業する。
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-printf '%s\n' ${ENVSPEC//,/ } > "$TMP/parc_env"
+printf '%s\n' ${ENVSPEC//"$SEP"/ } > "$TMP/parc_env"
+
+# 1 行 1 変数になっているか確かめる。区切りを間違えると倍率が単独の行になり、
+# `0.925` という名前の変数を書いたつもりの parc_env ができあがる。
+if grep -qvE '^[A-Za-z_][A-Za-z0-9_]*=' "$TMP/parc_env"; then
+    echo "ERROR: KEY=VAL になっていない行がある。区切り文字を確認すること" >&2
+    grep -nvE '^[A-Za-z_][A-Za-z0-9_]*=' "$TMP/parc_env" | sed 's/^/    /' >&2
+    echo "  値にカンマを含むなら PARC_RESPIN_SEP=';' を使う" >&2
+    exit 1
+fi
 
 echo "[respin] parc_env:"
 sed 's/^/    /' "$TMP/parc_env"
 
-( cd "$TMP" && zip -q "$OLDPWD/$DST" parc_env )
+# zip の追記は一時ディレクトリの中から行うので、宛先は先に絶対パスへ直しておく。
+# `$OLDPWD/$DST` だと DST が絶対パスのとき `/repo//abs/path` になって失敗する。
+case "$DST" in /*) DST_ABS="$DST" ;; *) DST_ABS="$PWD/$DST" ;; esac
+( cd "$TMP" && zip -q "$DST_ABS" parc_env )
 
 echo
 echo "[respin] --- zip 内の parc_env ---"
