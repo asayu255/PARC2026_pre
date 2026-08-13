@@ -36,8 +36,30 @@ find_python() {
 
 PY="$(find_python)"
 if [ -z "$PY" ] || [ ! -x "$PY" ]; then
-    echo "ERROR: parc-policy の python が見つからない。" >&2
-    echo "       PARC_POLICY_PYTHON=/path/to/envs/parc-policy/bin/python を指定すること。" >&2
+    # 「指定が無い」と「指定したパスが存在しない」を区別する。区別しないと、
+    # スイープで PARC_POLICY_PYTHON に存在しないパスを渡したときに
+    # 「指定すること」と言われ続けることになる（実際に一度やった）。
+    if [ -n "${PARC_POLICY_PYTHON:-}" ]; then
+        echo "ERROR: PARC_POLICY_PYTHON=$PARC_POLICY_PYTHON が実行できない。" >&2
+        [ -e "$PARC_POLICY_PYTHON" ] \
+            && echo "       ファイルはあるが実行権が無い。" >&2 \
+            || echo "       そのパスは存在しない。" >&2
+    else
+        echo "ERROR: parc-policy の python が見つからない。" >&2
+        echo "       PARC_POLICY_PYTHON=/path/to/envs/parc-policy/bin/python を指定すること。" >&2
+    fi
+    # 手で探させない。この機械にある env を出す。
+    found=0
+    for root in "${CONDA_PREFIX:-}" "$(command -v conda >/dev/null 2>&1 && conda info --base 2>/dev/null)" \
+                "$HOME/miniforge3" "$HOME/miniconda3" "$HOME/anaconda3" "$HOME/venvs"; do
+        [ -n "$root" ] || continue
+        for cand in "$root"/envs/*/bin/python "$root"/*/bin/python; do
+            [ -x "$cand" ] || continue
+            [ "$found" = 0 ] && echo "--- この機械にある候補 ---" >&2 && found=1
+            echo "    $cand" >&2
+        done
+    done
+    [ "$found" = 0 ] && echo "       候補が見つからない。conda env list で確認すること。" >&2
     exit 1
 fi
 
