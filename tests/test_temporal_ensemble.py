@@ -52,7 +52,9 @@ def load_module(monkeypatch, **env):
                  "PARC_ACT_SCALE", "PARC_ACT_SCALE_ROT",
                  "PARC_ACT_SLEW", "PARC_ACT_SLEW_ROT", "PARC_GRIP_RETRY",
                  "PARC_GRIP_RETRY_AFTER", "PARC_GRIP_RETRY_OPEN",
-                 "PARC_GRIP_RETRY_MAX", "PARC_GRIP_RETRY_MIN_STEP"):
+                 "PARC_GRIP_RETRY_MAX", "PARC_GRIP_RETRY_MIN_STEP",
+                 "PARC_GRIP_ROTATE", "PARC_STALL_EPS", "PARC_STALL_WINDOW",
+                 "PARC_STALL_MIN_STEP", "PARC_STALL_MAX", "PARC_STALL_FLUSH"):
         monkeypatch.delenv(name, raising=False)
     for name, value in env.items():
         monkeypatch.setenv(name, str(value))
@@ -88,7 +90,11 @@ def make_policy(mod, chunk_fn):
     p._grip_close_run = 0
     p._grip_open_left = 0
     p._grip_retries = 0
+    p._eef = mod.deque(maxlen=p.STALL_WINDOW + 1)
+    p._stall_seen = []
+    p._stall_hits = 0
     p.model = None
+    p.oft = None
     p.calls = 0
 
     def _predict(obs):
@@ -663,3 +669,198 @@ def test_the_measured_threshold_separates_the_observed_episodes(monkeypatch):
     assert fires(0.0018)                                   # 空振り -> 発火
     for ok in (0.0037, 0.0050, 0.0425, 0.0536, 0.0641):    # 掴めている -> 発火しない
         assert not fires(ok), ok
+
+
+# --- 停滞脱出（PARC_STALL_EPS）----------------------------------------------
+#
+# 方策も環境も決定的なので、同じ状態からは同じ行動しか出ない。300 step 何も
+# 起きない失敗は巡回に入っているとみるのが自然で、そこから抜けるには写像を
+# 外から変えるしかない。TTA の倍率列がそのレバーである。
+
+
+class FakeOFT:
+    """rotate/reset だけを持つ OFT の代役。何回切り替わったかを数える。"""
+
+    def __init__(self, banks=2):
+        self.banks, self.i, self.resets = banks, 0, 0
+
+    def rotate_crop_scales(self):
+        if self.i >= self.banks:
+            return None
+        self.i += 1
+        return (0.90, 0.90 + 0.01 * self.i)
+
+    def reset_crop_scales(self):
+        self.i = 0
+        self.resets += 1
+
+
+def at(xyz):
+    o = dict(OBS)
+    o["robot0_eef_pos"] = np.array(xyz, np.float64)
+    return o
+
+
+def test_stall_escape_is_off_by_default(monkeypatch):
+    """未測定のつまみを既定で入れない。0.370 の構成を黙って変えないこと。"""
+    cfg = load_module(monkeypatch).MyPolicy
+    assert cfg.STALL_EPS == 0.0
+    assert cfg.GRIP_ROTATE is False
+
+
+def test_a_still_hand_rotates_the_view_set(monkeypatch):
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1,
+                      PARC_STALL_EPS=0.01, PARC_STALL_WINDOW=4,
+                      PARC_STALL_MIN_STEP=0)
+    p = make_policy(mod, ramp())
+    p.oft = FakeOFT()
+
+    for _ in range(6):
+        p.get_action(at([0.1, 0.2, 0.3]))
+
+    assert p.oft.i == 1 and p._stall_hits == 1
+
+
+def test_a_moving_hand_never_rotates(monkeypatch):
+    """成功エピソードを壊さないこと。窓ぶん動いていれば発火しない。"""
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1,
+                      PARC_STALL_EPS=0.01, PARC_STALL_WINDOW=4,
+                      PARC_STALL_MIN_STEP=0)
+    p = make_policy(mod, ramp())
+    p.oft = FakeOFT()
+
+    for i in range(30):
+        p.get_action(at([0.01 * i, 0.0, 0.0]))    # 4 step で 0.03m 動く
+
+    assert p.oft.i == 0 and p._stall_hits == 0
+
+
+def test_the_escape_stops_when_the_banks_run_out(monkeypatch):
+    """予備列は 2 本。尽きたあと毎 step 呼び続けて溶かさないこと。"""
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1,
+                      PARC_STALL_EPS=0.01, PARC_STALL_WINDOW=2,
+                      PARC_STALL_MIN_STEP=0, PARC_STALL_MAX=9)
+    p = make_policy(mod, ramp())
+    p.oft = FakeOFT(banks=2)
+
+    for _ in range(40):
+        p.get_action(at([0.1, 0.2, 0.3]))
+
+    assert p.oft.i == 2                       # 予備を使い切って止まる
+
+
+def test_the_escape_respects_its_own_cap(monkeypatch):
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1,
+                      PARC_STALL_EPS=0.01, PARC_STALL_WINDOW=2,
+                      PARC_STALL_MIN_STEP=0, PARC_STALL_MAX=1)
+    p = make_policy(mod, ramp())
+    p.oft = FakeOFT(banks=5)
+
+    for _ in range(40):
+        p.get_action(at([0.1, 0.2, 0.3]))
+
+    assert p.oft.i == 1
+
+
+def test_the_escape_can_be_delayed_to_late_in_the_episode(monkeypatch):
+    """採点の成功 4 本は 109〜146 step。前半で触らせないための歯止め。"""
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1,
+                      PARC_STALL_EPS=0.01, PARC_STALL_WINDOW=2,
+                      PARC_STALL_MIN_STEP=20, PARC_STALL_MAX=1)
+    p = make_policy(mod, ramp())
+    p.oft = FakeOFT()
+
+    for _ in range(10):
+        p.get_action(at([0.1, 0.2, 0.3]))
+    assert p.oft.i == 0                       # 20 step 前は発火しない
+
+    for _ in range(15):
+        p.get_action(at([0.1, 0.2, 0.3]))
+    assert p.oft.i == 1
+
+
+def test_displacement_is_measured_even_when_the_escape_is_off(monkeypatch):
+    """閾値を勘で決めないため、計測は既定でも常時回る（gripper と同じ）。"""
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1,
+                      PARC_STALL_WINDOW=2)
+    p = make_policy(mod, ramp())
+    p._warming = False
+    p.oft = FakeOFT()
+
+    for i in range(6):
+        p.get_action(at([0.05 * i, 0.0, 0.0]))
+
+    assert p._stall_seen == pytest.approx([0.1] * 4)
+    assert p.oft.i == 0                       # 測るだけで手は出さない
+
+
+def test_the_escape_flushes_the_ensemble(monkeypatch):
+    """溜まった予測は巡回中の行動そのもの。残すと引き戻される。"""
+    mod = load_module(monkeypatch, PARC_STALL_EPS=0.01, PARC_STALL_WINDOW=2,
+                      PARC_STALL_MIN_STEP=0)
+    p = make_policy(mod, ramp())
+    p.oft = FakeOFT()
+
+    for _ in range(3):
+        p.get_action(at([0.1, 0.2, 0.3]))
+
+    assert p.oft.i == 1 and len(p._ens) <= 1
+
+
+def test_stall_state_resets_between_episodes(monkeypatch):
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1,
+                      PARC_STALL_EPS=0.01, PARC_STALL_WINDOW=2,
+                      PARC_STALL_MIN_STEP=0)
+    p = make_policy(mod, ramp())
+    p._warming = False
+    p.oft = FakeOFT()
+    for _ in range(5):
+        p.get_action(at([0.1, 0.2, 0.3]))
+
+    p.reset("next")
+
+    assert p._stall_seen == [] and p._stall_hits == 0 and len(p._eef) == 0
+    assert p.oft.resets == 1 and p.oft.i == 0   # 倍率列も持ち越さない
+
+
+def test_an_empty_grasp_can_also_rotate_the_view_set(monkeypatch):
+    """採点 12 回目: 開き直しは ep4 でだけ 2 回発火し、それでも救えなかった。
+
+    発火が失敗エピソードに限られることは採点ログで確認済みなので、そこへ
+    倍率列の切り替えを足すぶんには下振れが無い。
+    """
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1,
+                      PARC_GRIP_RETRY=0.02, PARC_GRIP_RETRY_AFTER=2,
+                      PARC_GRIP_ROTATE=1)
+    p = make_policy(mod, closing_chunks)
+    p.oft = FakeOFT()
+
+    drive_obs(p, grip([0.001, -0.001]), 4)
+
+    assert p._grip_retries == 1 and p.oft.i == 1
+
+
+def test_an_empty_grasp_leaves_the_views_alone_by_default(monkeypatch):
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1,
+                      PARC_GRIP_RETRY=0.02, PARC_GRIP_RETRY_AFTER=2)
+    p = make_policy(mod, closing_chunks)
+    p.oft = FakeOFT()
+
+    drive_obs(p, grip([0.001, -0.001]), 4)
+
+    assert p._grip_retries == 1 and p.oft.i == 0
+
+
+def test_missing_eef_pos_disables_the_detector(monkeypatch):
+    """手先位置を出さない環境では、黙って計測を諦める（落ちない）。"""
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1,
+                      PARC_STALL_EPS=0.01, PARC_STALL_WINDOW=2,
+                      PARC_STALL_MIN_STEP=0)
+    p = make_policy(mod, ramp())
+    p.oft = FakeOFT()
+    blind = {k: v for k, v in OBS.items() if k != "robot0_eef_pos"}
+
+    for _ in range(10):
+        p.get_action(blind)
+
+    assert p._stall_seen == [] and p.oft.i == 0

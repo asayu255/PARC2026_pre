@@ -314,6 +314,41 @@ class MyPolicy(BasePolicy):
     #: 二重の歯止めとして効く。
     GRIP_RETRY_MIN_STEP = _env_int("PARC_GRIP_RETRY_MIN_STEP", 0, minimum=0)
 
+    #: 停滞脱出。手先が動かなくなったら TTA の倍率列を切り替えて、決定的な
+    #: 方策が入り込んだ巡回から抜けさせる。単位は m、0 で無効。
+    #:
+    #: **方策も環境も決定的である。** 同一 zip の採点 2 回が step 単位まで
+    #: 一致した。したがって 300 step 何も起きない失敗は「難しくてできない」
+    #: ではなく、**同じ状態から同じ行動を出し続けている**とみるのが自然で、
+    #: 決定的な写像は自力ではそこから出られない。
+    #:
+    #: 採点 12 回目の |Δaction| がその形をしている。成功 4 本の xyz p50 は
+    #: 0.0235 / 0.0301 / 0.0421 / 0.0428 で下限 0.0235、対して **ep3 は 0.0046
+    #: （5 分の 1）、ep7 は 0.0121（半分）**。2 倍のマージンで分離できる。
+    #: ただし Δaction は指令の変化量であって腕が止まっている証明ではないので、
+    #: 判定には `robot0_eef_pos` の実変位を使い、**計測は既定でも常時回す**。
+    #: gripper のときと同じ順序である（測ってから閾値を決める）。
+    #:
+    #: なお ep4 は p50=0.0309 と成功と同じ範囲にある。あれは停滞ではなく
+    #: 空振り（`GRIP_RETRY` 側）で、実際そちらでだけ発火した。
+    STALL_EPS = _env_float("PARC_STALL_EPS", 0.0)
+    #: 何 step ぶんの変位を見るか
+    STALL_WINDOW = _env_int("PARC_STALL_WINDOW", 40, minimum=2)
+    #: この step より前では発火しない。開始直後の構えを停滞と誤らないため
+    STALL_MIN_STEP = _env_int("PARC_STALL_MIN_STEP", 60, minimum=0)
+    #: 1 エピソードあたりの切り替え回数の上限（予備列は 2 本しかない）
+    STALL_MAX = _env_int("PARC_STALL_MAX", 2, minimum=0)
+    #: 脱出時に temporal ensembling の蓄積も捨てるか。
+    #: 溜まった予測は巡回中の行動そのものなので、残すと引き戻される。
+    STALL_FLUSH = _env_int("PARC_STALL_FLUSH", 1, minimum=0) != 0
+    #: 空振り検出時にも倍率列を切り替えるか。
+    #:
+    #: 採点 12 回目で、開き直しは**狙った ep4 でだけ 2 回発火し、そして
+    #: 救えなかった**。接近位置そのものが違うということで、開き方を変えても
+    #: 届かない。届きうるのは方策の出力を変えることのほうである。
+    #: 発火が ep4 に限られることは採点ログで確認済みなので、**下振れが無い**。
+    GRIP_ROTATE = _env_int("PARC_GRIP_ROTATE", 0, minimum=0) != 0
+
     #: config.json の chunk_size / n_action_steps に一致させる
     ACTION_CHUNK_SIZE = 50
 
@@ -469,6 +504,10 @@ class MyPolicy(BasePolicy):
         self._grip_close_run = 0
         self._grip_open_left = 0
         self._grip_retries = 0
+        # 停滞の判定用。_stall_seen は脱出が無効でも溜まる
+        self._eef: deque[np.ndarray] = deque(maxlen=self.STALL_WINDOW + 1)
+        self._stall_seen: list[float] = []
+        self._stall_hits = 0
         self.policy_type = "smolvla"   # _load_model が config から上書きする
         self.oft = None                # OpenVLA-OFT のときだけ入る
         self.model = self._load_model()
@@ -663,6 +702,7 @@ class MyPolicy(BasePolicy):
             f"\n[MyPolicy]   act_scale={self.ACT_SCALE:g}"
             f" rot={(self.ACT_SCALE_ROT if self.ACT_SCALE_ROT > 0 else self.ACT_SCALE):g}"
             f"\n[MyPolicy]   slew={self._slew_desc()}"
+            f"\n[MyPolicy]   stall={self._stall_desc()}"
         )
         return self.oft
 
@@ -1089,6 +1129,7 @@ class MyPolicy(BasePolicy):
             self._track_delta(action)
         action = self._slew_limit(action)
         self._ep_step += 1
+        self._stall_escape(obs)
         action = self._grip_retry(obs, action)
         self._prev_action = action
         if not self._warming:
@@ -1122,6 +1163,70 @@ class MyPolicy(BasePolicy):
         if q.size < 2:
             return None
         return float(abs(float(q[0])) + abs(float(q[1])))
+
+    @staticmethod
+    def _eef_pos(obs: dict) -> np.ndarray | None:
+        """手先の位置 (m)。無い環境では None を返して停滞判定を諦める。"""
+        p = obs.get("robot0_eef_pos")
+        if p is None:
+            return None
+        p = np.asarray(p, dtype=np.float32).reshape(-1)
+        return p[:3] if p.size >= 3 else None
+
+    def _stall_displacement(self, obs: dict) -> float | None:
+        """直近 `STALL_WINDOW` step のあいだに手先が動いた距離 (m)。
+
+        窓が埋まるまでは None。**脱出が無効でも常に回る**（閾値を測るため）。
+        """
+        p = self._eef_pos(obs)
+        if p is None:
+            return None
+        self._eef.append(p)
+        if len(self._eef) <= self.STALL_WINDOW:
+            return None
+        d = float(np.linalg.norm(self._eef[-1] - self._eef[0]))
+        if not self._warming:
+            self._stall_seen.append(d)
+        return d
+
+    def _rotate_views(self, why: str) -> bool:
+        """TTA の倍率列を次の予備へ送り、巡回を壊す。切り替えたら True。
+
+        決定的な方策・決定的な環境では、同じ状態からは同じ行動しか出ない。
+        写像を外から変えないかぎり抜けられない、というのがこの機構の全部である。
+        """
+        if self.oft is None:
+            return False
+        scales = self.oft.rotate_crop_scales()
+        if scales is None:
+            return False
+        if self.STALL_FLUSH:
+            # 溜まった予測は巡回中の行動そのもので、残すと引き戻される
+            self._ens.clear()
+        if not self._warming:
+            print(f"[MyPolicy] {why} -> TTA の倍率列を切り替える"
+                  f" {[round(s, 3) for s in scales]}"
+                  f"{' / ensemble も捨てる' if self.STALL_FLUSH else ''}",
+                  flush=True)
+        return True
+
+    def _stall_escape(self, obs: dict) -> None:
+        """手先が止まっていたら倍率列を切り替える。計測は常時、発火は任意。"""
+        d = self._stall_displacement(obs)
+        if d is None or self.STALL_EPS <= 0.0:
+            return
+        if self._ep_step < self.STALL_MIN_STEP or self._stall_hits >= self.STALL_MAX:
+            return
+        if d >= self.STALL_EPS:
+            return
+        self._stall_hits += 1
+        if self._rotate_views(
+                f"停滞と判定（{self.STALL_WINDOW} step の変位 {d:.4f}m"
+                f" < {self.STALL_EPS:g}m、{self._stall_hits}/{self.STALL_MAX} 回目）"):
+            # 切り替え直後の窓で即再発火しないよう、履歴を捨てて測り直す
+            self._eef.clear()
+        else:
+            self._stall_hits = self.STALL_MAX   # 予備が尽きた。以後は測るだけ
 
     def _grip_retry(self, obs: dict, action: np.ndarray) -> np.ndarray:
         """閉指令が続いているのに指が閉じ切っていたら、開き直してやり直させる。
@@ -1158,6 +1263,8 @@ class MyPolicy(BasePolicy):
             self._grip_retries += 1
             self._grip_close_run = 0
             self._grip_open_left = self.GRIP_RETRY_OPEN - 1
+            if self.GRIP_ROTATE:
+                self._rotate_views(f"空振り（開き {opening:.4f}）")
             if not self._warming:
                 print(f"[MyPolicy] 把持失敗と判定（開き {opening:.4f}"
                       f" < {self.GRIP_RETRY:g}）。{self.GRIP_RETRY_OPEN} step 開き直す"
@@ -1274,6 +1381,16 @@ class MyPolicy(BasePolicy):
             if self.ACT_SLEW > 0.0 else f"rot={rot:g} /step のみ"
         )
 
+    def _stall_desc(self) -> str:
+        rot = " +空振りでも切替" if self.GRIP_ROTATE else ""
+        if self.STALL_EPS <= 0.0:
+            return f"off（計測のみ、窓={self.STALL_WINDOW}step）{rot}".rstrip()
+        return (
+            f"{self.STALL_EPS:g}m/{self.STALL_WINDOW}step"
+            f" 最大{self.STALL_MAX}回 step>={self.STALL_MIN_STEP}"
+            f"{' flush' if self.STALL_FLUSH else ''}{rot}"
+        )
+
     def _clear_episode_state(self) -> None:
         """エピソード境界で捨てる状態。持ち越すと前エピソードの action が
         次エピソードの冒頭に流れ込み、衝突の原因になる。"""
@@ -1328,11 +1445,26 @@ class MyPolicy(BasePolicy):
                 f" (retry={self.GRIP_RETRY:g})",
                 flush=True,
             )
+        if self._stall_seen:
+            v = np.asarray(self._stall_seen, dtype=np.float64)
+            p10, p50 = np.percentile(v, [10, 50])
+            print(
+                f"[MyPolicy] 前エピソードの手先変位/{self.STALL_WINDOW}step:"
+                f" n={v.size} min={v.min():.4f} p10={p10:.4f} p50={p50:.4f}"
+                f" max={v.max():.4f} 切り替え={self._stall_hits} 回"
+                f" (stall={self.STALL_EPS:g})",
+                flush=True,
+            )
         self._ep_step = 0
         self._grip_seen = []
         self._grip_close_run = 0
         self._grip_open_left = 0
         self._grip_retries = 0
+        self._eef.clear()
+        self._stall_seen = []
+        self._stall_hits = 0
+        if self.oft is not None:
+            self.oft.reset_crop_scales()   # 倍率列をエピソードへ持ち越さない
         self._d_xyz = []
         self._d_rot = []
         self._d_clip = 0

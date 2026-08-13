@@ -405,6 +405,79 @@ def test_no_view_skips_the_crop():
     assert all(x < 1.0 for x in oft_policy.TTA_CROP_SCALES)
 
 
+def test_the_first_bank_is_the_shipped_one():
+    """0 番目の予備列は既定と同一でなければならない。
+
+    ここがずれると、脱出が一度も起きなかったエピソードの挙動まで変わる。
+    """
+    assert oft_policy.TTA_CROP_BANKS[0] is oft_policy.TTA_CROP_SCALES
+
+
+def test_every_bank_is_balanced_around_the_nominal_crop():
+    """どの列も、先頭 N 個の平均が公称 0.90 でなければならない（N は奇数）。
+
+    `tta2` は平均が 0.925 と有害側へずれて ep6 を 119 -> 214 step にした。
+    脱出で列を差し替えるときに同じ罠を踏まないための固定である。
+    """
+    for i, bank in enumerate(oft_policy.TTA_CROP_BANKS):
+        for n in (1, 3, 5, 7):
+            assert sum(bank[:n]) / n == pytest.approx(0.90), (i, n)
+
+
+def test_every_bank_avoids_the_identity_crop():
+    for bank in oft_policy.TTA_CROP_BANKS:
+        assert all(x < 1.0 for x in bank)
+
+
+def test_the_banks_actually_differ_at_the_shipped_view_count():
+    """脱出は「同じ状態から別の行動」が出ないと意味が無い。"""
+    seen = {bank[:3] for bank in oft_policy.TTA_CROP_BANKS}
+    assert len(seen) == len(oft_policy.TTA_CROP_BANKS)
+
+
+def _bare_model(scales, views, pinned=False):
+    """__init__ を通さずに倍率列まわりだけ組み立てる（重みを読まない）。"""
+    m = oft_policy.OFTModel.__new__(oft_policy.OFTModel)
+    m.crop_scales = scales
+    m.tta_views = views
+    m._bank = 0
+    m._scales_pinned = pinned
+    return m
+
+
+def test_rotation_walks_the_banks_and_then_stops():
+    m = _bare_model(oft_policy.TTA_CROP_SCALES, 3)
+    first = m.rotate_crop_scales()
+    second = m.rotate_crop_scales()
+
+    assert first == oft_policy.TTA_CROP_BANKS[1][:3]
+    assert second == oft_policy.TTA_CROP_BANKS[2][:3]
+    assert m.rotate_crop_scales() is None       # 予備は 2 本きり
+
+
+def test_rotation_is_a_noop_for_a_single_view():
+    """1 視点では全列の先頭が 0.90 で同一。黙って空振りしない。"""
+    assert _bare_model(oft_policy.TTA_CROP_SCALES, 1).rotate_crop_scales() is None
+
+
+def test_rotation_respects_an_explicit_scale_list():
+    """PARC_OFT_TTA_SCALES で固定した指定を黙って破らない。"""
+    m = _bare_model((0.9, 0.94, 0.86), 3, pinned=True)
+
+    assert m.rotate_crop_scales() is None
+    m.reset_crop_scales()
+    assert m.crop_scales == (0.9, 0.94, 0.86)
+
+
+def test_reset_puts_the_default_bank_back():
+    m = _bare_model(oft_policy.TTA_CROP_SCALES, 3)
+    m.rotate_crop_scales()
+
+    m.reset_crop_scales()
+
+    assert m.crop_scales is oft_policy.TTA_CROP_SCALES and m._bank == 0
+
+
 def test_prepare_image_honours_an_explicit_crop_scale():
     pytest.importorskip("PIL")
     torch = pytest.importorskip("torch")

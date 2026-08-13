@@ -247,6 +247,28 @@ def prepare_image(
 #: **どの視点もクロップであること**をこの並びの条件とする。
 TTA_CROP_SCALES = (0.90, 0.95, 0.85, 0.925, 0.875, 0.975, 0.825, 0.80)
 
+#: 停滞脱出用の予備の倍率列（`OFTModel.rotate_crop_scales`）。
+#:
+#: 方策も環境も決定的である（同一 zip の採点 2 回が step 単位まで一致した）。
+#: したがって 300 step 何も起きない失敗は「難しくてできない」ではなく、
+#: **同じ状態から同じ行動を出し続ける巡回に入っている**とみるのが自然である。
+#: 決定的な写像は自力では巡回から出られないので、外から写像そのものを
+#: 変えてやるしかない。
+#:
+#: そのレバーとしてクロップ倍率は既に実測で強い。同一モデル・同一エピソードで
+#: ep6 は 119 / 214 / 119 / 時間切れ、ep1 は 時間切れ / 207 / 146 / 149 と、
+#: 倍率列を変えるだけで成否が反転している。
+#:
+#: **どの列も 0.90 を中心に対称**である（±0.05 / ±0.025 / ±0.075 の対を
+#: 順に前へ出しただけ）。先頭 N 個の平均が公称 0.90 のままなので、
+#: 「平均倍率がずれると壊れる」（`tta2` が ep6 を 119 -> 214 にした）を
+#: 踏まない。0 番目は `TTA_CROP_SCALES` と同一でなければならない。
+TTA_CROP_BANKS = (
+    TTA_CROP_SCALES,
+    (0.90, 0.925, 0.875, 0.975, 0.825, 0.95, 0.85, 0.80),
+    (0.90, 0.975, 0.825, 0.95, 0.85, 0.925, 0.875, 0.80),
+)
+
 
 def resolve_crop_scales(spec: str | None = None) -> tuple[float, ...]:
     """TTA の倍率列を決める。`PARC_OFT_TTA_SCALES` で丸ごと差し替えられる。
@@ -345,6 +367,10 @@ class OFTModel:
         self.gripper_transform = gripper_transform
         self.gripper_binarize = gripper_binarize
         self.crop_scales = resolve_crop_scales()
+        #: 倍率列を環境変数で明示的に固定したか。固定されていれば
+        #: 停滞脱出でも動かさない（指定を黙って破るほうが害が大きい）。
+        self._scales_pinned = self.crop_scales is not TTA_CROP_SCALES
+        self._bank = 0
         self.tta_views = max(1, min(int(tta_views), len(self.crop_scales)))
         self.device = torch.device(
             device or ("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -479,6 +505,33 @@ class OFTModel:
                 )
                 break
         return sorted(libero)[0]
+
+    # -- 停滞脱出 -----------------------------------------------------------
+
+    def rotate_crop_scales(self) -> tuple[float, ...] | None:
+        """倍率列を次の予備列へ差し替える。差し替えたら新しい列を返す。
+
+        決定的な方策が巡回に入ったときに、**同じ状態から別の行動**を出させる
+        ための唯一のレバーである（`TTA_CROP_BANKS` の注記）。予備を使い切るか、
+        `PARC_OFT_TTA_SCALES` で列が固定されていれば `None` を返す。
+
+        `tta_views=1` では先頭が全列 0.90 で同一なので効果が無い。呼び出し側で
+        止めるのが筋だが、ここでも `None` を返して黙って空振りしないようにする。
+        """
+        if self._scales_pinned or self.tta_views < 2:
+            return None
+        if self._bank + 1 >= len(TTA_CROP_BANKS):
+            return None
+        self._bank += 1
+        self.crop_scales = TTA_CROP_BANKS[self._bank]
+        return self.crop_scales[: self.tta_views]
+
+    def reset_crop_scales(self) -> None:
+        """倍率列を既定へ戻す。エピソードをまたいで持ち越さないため。"""
+        if self._scales_pinned:
+            return
+        self._bank = 0
+        self.crop_scales = TTA_CROP_SCALES
 
     # -- 推論 ---------------------------------------------------------------
 
