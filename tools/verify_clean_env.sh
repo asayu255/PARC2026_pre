@@ -23,6 +23,33 @@ cd "$ROOT"
 ZIP="${PARC_ZIP:-submission.zip}"
 KEEP=0
 [ "${1:-}" = "--keep" ] && KEEP=1
+
+# PARC_ZIP を付け忘れると、既定の submission.zip を検証して PASS が出る。
+# **それは別物の検証**で、しかも PASS するので気づけない。実際に一度やった:
+# 12 GB の OFT 版を respin した直後に PARC_ZIP 無しで走らせ、1.6 GB の
+# SmolVLA 版が PASS した（transformers 4.57.6 / レイテンシ 0.250s /
+# [OFT] ready が出ない / nondeterministic 警告、で後から判別できた）。
+#
+# zip が 1 つしか無いなら曖昧さは無いので黙って進む。複数あるなら止める。
+if [ -z "${PARC_ZIP:-}" ]; then
+    shopt -s nullglob
+    cands=(submission*.zip)
+    shopt -u nullglob
+    if [ "${#cands[@]}" -gt 1 ]; then
+        echo "ERROR: zip が複数ある。PARC_ZIP でどれを検証するか指定すること。" >&2
+        ls -lht --time-style=+%m/%d\ %H:%M "${cands[@]}" \
+            | awk '{printf "    %-34s %6s  %s %s\n", $NF, $5, $6, $7}' >&2
+        # 例には**いちばん新しい** zip を出す。直前に作ったものを検証したい
+        # のが普通で、glob 順（= 名前順）の先頭はたいてい古いほうである。
+        newest="$(ls -t "${cands[@]}" | head -1)"
+        echo "  例: PARC_ZIP=$newest bash tools/verify_clean_env.sh" >&2
+        exit 2
+    fi
+    # 1 個しか無いならそれを検証する。名前が submission.zip でなくても、
+    # 曖昧さが無い以上「submission.zip が無い」と断るのは不親切なだけである。
+    [ "${#cands[@]}" -eq 1 ] && ZIP="${cands[0]}"
+fi
+
 test -f "$ZIP" || { echo "ERROR: $ZIP が無い。先に bash tools/make_submission.sh" >&2; exit 1; }
 
 PY="${PARC_POLICY_PYTHON:-}"
@@ -45,6 +72,13 @@ echo " クリーン環境での提出物検証"
 echo "   zip    : $ZIP ($(du -h "$ZIP" | cut -f1))"
 echo "   base py: $PY ($("$PY" -V 2>&1))"
 echo "   venv   : $VENV"
+# どの構成を検証しているのかを最初に出す。取り違えはここで気づける。
+if unzip -l "$ZIP" parc_env >/dev/null 2>&1; then
+    echo "   parc_env:"
+    unzip -p "$ZIP" parc_env | sed 's/^/     /'
+else
+    echo "   parc_env: 無し（policy_server.py の既定で走る）"
+fi
 echo "=============================================="
 
 rm -rf "$VENV" "$HFDIR"; mkdir -p "$HFDIR"
