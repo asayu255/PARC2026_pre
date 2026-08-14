@@ -314,6 +314,32 @@ class MyPolicy(BasePolicy):
     #: 二重の歯止めとして効く。
     GRIP_RETRY_MIN_STEP = _env_int("PARC_GRIP_RETRY_MIN_STEP", 0, minimum=0)
 
+    #: エピソード冒頭で「何もしない」step 数。0 で無効。
+    #:
+    #: **本家の評価ループはこれをやっている。** openvla-oft の
+    #: `experiments/robot/libero/run_libero_eval.py` は毎エピソードの先頭で
+    #: `num_steps_wait = 10` step ぶん、ダミー action（並進も回転もゼロ、
+    #: gripper は開く）を送って方策を止めている。コメントはこう書いてある:
+    #:
+    #:   # IMPORTANT: Do nothing for the first few timesteps because the
+    #:   # simulator drops objects and we need to wait for them to fall
+    #:
+    #: **LIBERO は reset 直後に物体を落とす。** 最初の数フレームは物体が空中に
+    #: あり、そこで方策を走らせると存在しない位置へ向かって出発する。
+    #: この checkpoint が報告している数字も LIBERO-Plus のベンチマーク値も、
+    #: すべてこの待ちの下で測られている。**こちらは一度もやっていなかった。**
+    #:
+    #: 我々の失敗の形と合う。ep3 は 300 step で閉指令が 0 回（掴みに行って
+    #: すらいない）、ep4 は空振りで、開き直しても救えなかった＝接近位置その
+    #: ものが違う。どちらも接近フェーズの失敗である。そして**方策も環境も
+    #: 決定的**なので、序盤の誤りは永久に取り返せない。
+    #:
+    #: 下振れは計算できる。成功 4 本が 10 step ずつ延びて 4×10×0.0032/8 =
+    #: **−0.016**。上振れは 1 本拾えば +0.09。
+    SETTLE_STEPS = _env_int("PARC_SETTLE_STEPS", 0, minimum=0)
+    #: 待っている間の gripper 指令。本家のダミーは -1（開く）
+    SETTLE_GRIPPER = _env_float("PARC_SETTLE_GRIPPER", -1.0)
+
     #: 停滞脱出。手先が動かなくなったら TTA の倍率列を切り替えて、決定的な
     #: 方策が入り込んだ巡回から抜けさせる。単位は m、0 で無効。
     #:
@@ -703,6 +729,8 @@ class MyPolicy(BasePolicy):
             f" rot={(self.ACT_SCALE_ROT if self.ACT_SCALE_ROT > 0 else self.ACT_SCALE):g}"
             f"\n[MyPolicy]   slew={self._slew_desc()}"
             f"\n[MyPolicy]   stall={self._stall_desc()}"
+            f"\n[MyPolicy]   settle={self.SETTLE_STEPS} step"
+            f"{'（無効）' if self.SETTLE_STEPS == 0 else f'（gripper={self.SETTLE_GRIPPER:g}）'}"
         )
         return self.oft
 
@@ -1115,6 +1143,15 @@ class MyPolicy(BasePolicy):
 
     def get_action(self, obs: dict[str, np.ndarray]) -> np.ndarray:
         t0 = time.perf_counter()
+        # 物体が落ち終わるのを待つ。推論そのものを飛ばすので、落下中の観測が
+        # ensembling の蓄積に入ることも無い（そこが待つ理由なので必須である）。
+        # warmup はモデルを暖めるのが目的なので対象外。
+        if not self._warming and self._ep_step < self.SETTLE_STEPS:
+            self._ep_step += 1
+            if self._ep_step == self.SETTLE_STEPS:
+                print(f"[MyPolicy] 冒頭 {self.SETTLE_STEPS} step は静止して待った"
+                      f"（本家 num_steps_wait 相当）", flush=True)
+            return self._settle_action()
         if _DEBUG_DIR and not self._warming:
             self._trace_step(obs)
         if self.TEMPORAL_ENSEMBLE:
@@ -1163,6 +1200,17 @@ class MyPolicy(BasePolicy):
         if q.size < 2:
             return None
         return float(abs(float(q[0])) + abs(float(q[1])))
+
+    def _settle_action(self) -> np.ndarray:
+        """待機中に返す action。本家の `get_libero_dummy_action` と同じ形。
+
+        並進も回転もゼロ、gripper だけ開いておく。`_prev_action` は触らない
+        ので、待機明けの 1 手目は「エピソード先頭」として扱われる（ゼロとの
+        差分を |Δaction| に混ぜても意味が無い）。
+        """
+        a = np.zeros(7, dtype=np.float32)
+        a[6] = self.SETTLE_GRIPPER
+        return a
 
     @staticmethod
     def _eef_pos(obs: dict) -> np.ndarray | None:

@@ -54,7 +54,8 @@ def load_module(monkeypatch, **env):
                  "PARC_GRIP_RETRY_AFTER", "PARC_GRIP_RETRY_OPEN",
                  "PARC_GRIP_RETRY_MAX", "PARC_GRIP_RETRY_MIN_STEP",
                  "PARC_GRIP_ROTATE", "PARC_STALL_EPS", "PARC_STALL_WINDOW",
-                 "PARC_STALL_MIN_STEP", "PARC_STALL_MAX", "PARC_STALL_FLUSH"):
+                 "PARC_STALL_MIN_STEP", "PARC_STALL_MAX", "PARC_STALL_FLUSH",
+                 "PARC_SETTLE_STEPS", "PARC_SETTLE_GRIPPER"):
         monkeypatch.delenv(name, raising=False)
     for name, value in env.items():
         monkeypatch.setenv(name, str(value))
@@ -864,3 +865,74 @@ def test_missing_eef_pos_disables_the_detector(monkeypatch):
         p.get_action(blind)
 
     assert p._stall_seen == [] and p.oft.i == 0
+
+
+# --- 冒頭の待機（PARC_SETTLE_STEPS）------------------------------------------
+#
+# 本家 run_libero_eval.py は毎エピソードの先頭で num_steps_wait=10 step ぶん
+# ダミー action を送る。「シミュレータが物体を落とすので落ち終わるのを待つ」
+# ためで、この checkpoint の報告値はすべてその条件で測られている。
+
+
+def test_settle_is_off_by_default(monkeypatch):
+    """未測定のつまみを既定で入れない。0.371 の構成を黙って変えないこと。"""
+    cfg = load_module(monkeypatch).MyPolicy
+    assert cfg.SETTLE_STEPS == 0
+
+
+def test_settle_holds_still_with_the_gripper_open(monkeypatch):
+    """本家の get_libero_dummy_action と同じ [0,0,0,0,0,0,-1] を返す。"""
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1,
+                      PARC_SETTLE_STEPS=3)
+    p = make_policy(mod, ramp())
+    p._warming = False
+
+    out = [p.get_action(OBS) for _ in range(5)]
+
+    for a in out[:3]:
+        assert list(a) == [0.0] * 6 + [-1.0]
+    assert out[3][0] != 0.0 and out[4][0] != 0.0      # 4 手目から方策に戻る
+
+
+def test_settle_does_not_run_inference(monkeypatch):
+    """待機中は推論しない。落下中の観測が ensembling に入らないのが要点。"""
+    mod = load_module(monkeypatch, PARC_SETTLE_STEPS=4)
+    p = make_policy(mod, ramp())
+    p._warming = False
+
+    drive(p, 4)
+    assert p.calls == 0 and len(p._ens) == 0
+
+    drive(p, 1)
+    assert p.calls == 1
+
+
+def test_settle_does_not_touch_the_warmup(monkeypatch):
+    """warmup はモデルを暖めるのが目的なので、待機で素通りさせない。"""
+    mod = load_module(monkeypatch, PARC_SETTLE_STEPS=4)
+    p = make_policy(mod, ramp())          # _warming=True のまま
+
+    drive(p, 2)
+
+    assert p.calls == 2
+
+
+def test_settle_restarts_every_episode(monkeypatch):
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1,
+                      PARC_SETTLE_STEPS=2)
+    p = make_policy(mod, ramp())
+    p._warming = False
+    drive(p, 4)
+
+    p.reset("next")
+
+    assert list(p.get_action(OBS)) == [0.0] * 6 + [-1.0]
+
+
+def test_settle_gripper_can_be_changed(monkeypatch):
+    mod = load_module(monkeypatch, PARC_ENSEMBLE=0, PARC_N_EXEC=1,
+                      PARC_SETTLE_STEPS=1, PARC_SETTLE_GRIPPER=1.0)
+    p = make_policy(mod, ramp())
+    p._warming = False
+
+    assert p.get_action(OBS)[6] == 1.0
