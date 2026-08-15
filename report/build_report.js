@@ -123,7 +123,7 @@ const doc = new Document({
       h1('4. 権利関係'),
 
       table([2200, 7640], [
-        ['ベースモデルのライセンス', '【要確認】Sylvest/openvla-7b-oft-finetuned-libero-plus-mixdata のモデルカード記載を提出時に確認のこと。基盤である OpenVLA および OpenVLA-OFT（moojink/openvla-oft）はいずれも MIT License'],
+        ['ベースモデルのライセンス', 'MIT License。Sylvest/openvla-7b-oft-finetuned-libero-plus-mixdata のモデルカードに全文が掲載されている（ただし著作権表示は "Copyright (c) [year] [fullname]" とテンプレートのままで、権利者名は未記入）。基盤である OpenVLA および OpenVLA-OFT（moojink/openvla-oft）も MIT License'],
         ['学習データのライセンス', 'LIBERO: MIT License（Copyright (c) 2023 Lifelong Robot Learning）。LIBERO-plus（sylvestf/LIBERO-plus, および HF datasets/Sylvest/LIBERO-plus）: 本レポート作成時点で LICENSE ファイル・README ともにライセンス記載を確認できず。明示的許諾の無い著作物は既定で全権利が留保される点に留意。ただし LIBERO 由来部分には LIBERO の MIT License が及ぶ'],
         ['第三者コードのライセンス', '提出物に同梱: transformers 4.40.1 / tokenizers 0.19.1 / timm 0.9.10 / accelerate（いずれも Apache-2.0）、PyTorch（BSD-3-Clause）、NumPy（BSD-3-Clause）、FastAPI（MIT）、uvicorn（BSD-3-Clause）。submission/vendor_oft/ は checkpoint 同梱の trust_remote_code コードが必要とする prismatic.vla.constants / prismatic.training.train_utils の最小移植で、値は openvla-oft（MIT License）の LIBERO 設定に一致させている。評価環境側で使用: LIBERO（MIT）、robosuite 1.4.0（MIT）、MuJoCo 3.7.0（Apache-2.0）、gym 0.25.2（MIT）ほか。全一覧は同梱の THIRD_PARTY_LICENSES.md に記載'],
       ], { size: 15 }),
