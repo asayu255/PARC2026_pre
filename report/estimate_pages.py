@@ -8,19 +8,22 @@ import re
 import sys
 import zipfile
 
-A4_H = 16838
-MARGIN_TOP, MARGIN_BOT = 850, 700
-PAGE_H = A4_H - MARGIN_TOP - MARGIN_BOT     # 1 ページの本文高さ
-BODY_W = 9840                               # 本文の幅（左右余白 850 ずつ）
+A4_H, A4_W = 16838, 11906
 
 NS = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
 
 
+#: 半角文字の幅（em 比）。Yu Gothic の Latin は小文字で 0.5em 前後だが、
+#: 大文字・数字は 0.6em を超える。**多めに見て安全側へ倒す** — 見積りが
+#: 実寸を下回ると 2 ページ制限を静かに割る側に間違えることになる。
+ASCII_EM = 0.58
+
+
 def char_w(ch, half_pt):
-    """1 文字の幅を twip で返す。全角は font size ぶん、半角はその半分。"""
+    """1 文字の幅を twip で返す。全角は font size ぶん、半角はその ASCII_EM 倍。"""
     full_pt = half_pt / 2.0
     if ord(ch) < 0x2000 or ch in '−·→×':
-        return full_pt * 20 * 0.52
+        return full_pt * 20 * ASCII_EM
     return full_pt * 20
 
 
@@ -31,6 +34,10 @@ def line_count(text, half_pt, width):
     return max(1, int(w / width) + (1 if w % width else 0))
 
 
+PAGE_H = 0
+BODY_W = 0
+
+
 def main(path):
     with zipfile.ZipFile(path) as z:
         xml = z.read('word/document.xml').decode('utf-8')
@@ -38,6 +45,17 @@ def main(path):
     import xml.etree.ElementTree as ET
     root = ET.fromstring(xml)
     body = root.find(f'{NS}body')
+
+    # 余白は sectPr から読む。ここを決め打ちにすると build 側で余白を変えた
+    # ときに黙って古い容量で割り続ける。
+    mar = body.find(f'{NS}sectPr/{NS}pgMar')
+    top = int(mar.get(f'{NS}top', 850)) if mar is not None else 850
+    bot = int(mar.get(f'{NS}bottom', 700)) if mar is not None else 700
+    left = int(mar.get(f'{NS}left', 850)) if mar is not None else 850
+    right = int(mar.get(f'{NS}right', 850)) if mar is not None else 850
+    global PAGE_H, BODY_W
+    PAGE_H = A4_H - top - bot
+    BODY_W = A4_W - left - right
 
     total = 0.0
     detail = []
@@ -52,12 +70,19 @@ def main(path):
         spacing = pel.find(f'{NS}pPr/{NS}spacing')
         before = after = 0
         line = 240
+        rule = 'auto'
         if spacing is not None:
             before = int(spacing.get(f'{NS}before', 0) or 0)
             after = int(spacing.get(f'{NS}after', 0) or 0)
             line = int(spacing.get(f'{NS}line', 240) or 240)
-        # line は auto（240 分率）。1 行の実高は フォント高 * 1.2 * (line/240)
-        lh = (sz / 2.0) * 20 * 1.2 * (line / 240.0)
+            rule = spacing.get(f'{NS}lineRule', 'auto')
+        if rule == 'exact':
+            # 行高が twip で確定する。見積りの不確かさが折り返し数だけになる。
+            lh = line
+        else:
+            # auto は 240 分率。フォントの hhea 由来で 1.2〜1.6em と幅があり、
+            # Yu Gothic は特に大きい。ここを踏むと見積りが当てにならない。
+            lh = (sz / 2.0) * 20 * 1.45 * (line / 240.0)
         n = line_count(txt, sz, width)
         return n * lh + before + after, txt[:40], n
 
