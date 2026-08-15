@@ -20,3 +20,6 @@ submission.zip
 .sweep.pid
 submission/vendor/
 submission/requirements.txt
+
+# レポート生成用（npm install docx で復元する）
+report/node_modules/
