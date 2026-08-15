@@ -97,7 +97,7 @@ const doc = new Document({
         ['モデル名・バージョン', '提出システム: OpenVLA-OFT+ + temporal ensembling (h=8) + crop-scale TTA (5 視点)。構成識別子 tta5（parc_env: PARC_ENSEMBLE=1 / PARC_ENS_H=8 / PARC_ENS_GRIPPER=0 / PARC_OFT_TTA=5）'],
         ['ベースモデル名', 'OpenVLA-OFT+ … Sylvest/openvla-7b-oft-finetuned-libero-plus-mixdata（さらにその基盤は openvla/openvla-7b）'],
         ['ベース重みの入手元', 'Hugging Face Hub。huggingface_hub.snapshot_download で取得（tools/fetch_model.sh）。取得日 2026-08-11'],
-        ['重みの revision / commit hash', '【要記入】revision 未指定で取得したため main ブランチの当時の HEAD。正確な commit hash は取得先の .cache/huggingface/download メタデータより取得のこと'],
+        ['重みの revision / commit hash', 'commit a85655ec941bae6644c9fbdf62db02b9726d7cf5（main ブランチ、2026-08-11 取得時点の HEAD）。revision を指定せず取得したため、ローカルの download メタデータから復元した。全ファイルが同一 commit を指しており、スナップショットの整合は確認済み'],
         ['提出チェックポイントのハッシュ値', '提出 zip（submission_oft_tta5.zip）の SHA-256: a2cc2f91ab7b77a423f65f306ef8d1fceccdd953df6c2c71128bff84088a37ea'],
         ['モデル構成', 'Prismatic VLM 系 7B（dinosiglip 視覚バックボーン＋7B LLM、hidden 4096）、bf16、約 15.1 GB。行動ヘッドは L1 回帰ヘッド（自己回帰トークン生成ではなく決定的）。proprio projector により 8 次元の固有受容感覚を入力に併合'],
         ['推論方式', '1 回の forward で action chunk を一括生成する決定的推論。画像は両カメラとも 180 度回転 → 中心 90% クロップ → LANCZOS で 224×224。出力 gripper 次元は [0,1]→[−1,1] 正規化・sign による二値化・符号反転（環境規約）を適用。サンプリング・温度パラメータは無し'],

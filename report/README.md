@@ -6,49 +6,32 @@
 
 内容の根拠はすべて `PROGRESS.md` と `evidence/grading/` にある。
 
-## 【要記入】は残り 2 か所
+## 【要記入】は残り 1 か所
 
-提出 zip の SHA-256 は実測済みで本文に入れてある:
+実測して本文へ入れ終わったもの:
 
-    a2cc2f91ab7b77a423f65f306ef8d1fceccdd953df6c2c71128bff84088a37ea
-    （submission_oft_tta5.zip）
+| 項目 | 値 |
+|---|---|
+| 提出 zip の SHA-256 | `a2cc2f91ab7b77a423f65f306ef8d1fceccdd953df6c2c71128bff84088a37ea` |
+| ベース重みの commit | `a85655ec941bae6644c9fbdf62db02b9726d7cf5` |
 
-このコンテナからは Hugging Face への egress が塞がれており、また提出 zip と
-重みが GPU マシン側にあるため、**3 項目だけ実測できていない。**
-GPU マシンで以下を実行して埋めること。
+commit は `.cache/huggingface/download/*.metadata` の 1 行目から復元した。
+**全ファイルが同一の値を返した**ので、スナップショットが 1 コミットから
+揃っていることも確認できている。
 
-### 1. ベース重みの commit hash
-
-**`submission/model_weights` を見ても出ない。** そこは SmolVLA 用で、
-OFT+ の重みは `tools/stage_oft_submission.sh` の既定である
-**`~/parc_models/oft_libero_plus`** にある（`PARC_OFT_WEIGHTS` で変更可）。
-
-`tools/fetch_model.sh` は `revision` を指定せずに `snapshot_download` を呼ぶので、
-取得したのは **2026-08-11 時点の main の HEAD** である。`local_dir` 付きで
-落とすと 1 ファイルにつき `.metadata` が作られ、**その 1 行目が commit hash**:
+復元コマンド（`head -1` は複数ファイルだと `==> file <==` の見出しを付けるため、
+`sort` に通すと見出しと中身が混ざる。1 ファイルずつ回すこと）:
 
 ```bash
-head -1 ~/parc_models/oft_libero_plus/.cache/huggingface/download/*.metadata \
-  | sort -u | head
+for f in ~/parc_models/oft_libero_plus/.cache/huggingface/download/*.metadata; do
+    head -1 "$f"
+done | sort -u
 ```
 
-これも空なら、HF のキャッシュ側にスナップショットが残っていないか見る
-（`snapshots/` の直下のディレクトリ名がそのまま commit hash）:
+残る 1 項目は、このコンテナから Hugging Face への egress が塞がれているため
+確認できていない。ブラウザで見て差し替えること。
 
-```bash
-ls ~/.cache/huggingface/hub/models--Sylvest--openvla-7b-oft-finetuned-libero-plus-mixdata/snapshots/
-```
-
-どちらも取れなければ Hub に問い合わせる。**ただしこれは「現在の」main の SHA**
-なので、2026-08-11 以降にリポジトリが更新されていれば当時のものと一致しない。
-その場合はコミット履歴から当時の HEAD を特定すること。
-
-```bash
-python -c "from huggingface_hub import HfApi; \
-  print(HfApi().model_info('Sylvest/openvla-7b-oft-finetuned-libero-plus-mixdata').sha)"
-```
-
-### 2. ベースモデルのライセンス
+### ベースモデルのライセンス
 
 `https://huggingface.co/Sylvest/openvla-7b-oft-finetuned-libero-plus-mixdata`
 のモデルカードに記載されたライセンス識別子を確認して差し替える。
@@ -59,6 +42,6 @@ python -c "from huggingface_hub import HfApi; \
 
 このコンテナでは LibreOffice が壊れていて（`.txt` すら変換できない）
 レンダリングによる目視確認ができなかった。代わりに `word/document.xml` から
-行数を積んで見積もっており、**約 1.13 ページ**（2 ページ制限に対して 43% の余裕）。
+行数を積んで見積もっており、**約 1.14 ページ**（2 ページ制限に対して 43% の余裕）。
 見積りの精度は ±15% 程度なので余裕は十分だが、**提出前に一度開いて
 実際のページ数を確認すること。**
